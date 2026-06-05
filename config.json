@@ -1,0 +1,5 @@
+{
+  "schwab_client_id": "2fpHvY5h4bDsn2hBRVdbcGli1AFrajXRWYreD13CSunYaaCP",
+  "schwab_client_secret": "Nx5hKFsOyv3MIGsRxy0UjWMXjzxnR5k80jltSAcDAuBSdF1RGlcBX0HWP2ZXOQC7",
+  "_note": "Replace the values above with your Schwab credentials. This file is never sent anywhere — it stays on your machine only."
+}
