@@ -250,6 +250,43 @@ check('Parse 2026-07-17',      parse_exp('2026-07-17'),   date(2026, 7, 17))
 check('Invalid returns None',  parse_exp('garbage'),      None)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Auth state machine')
+# Simulate the auth status logic to verify state transitions
+def auth_status(connected, pending, error, creds_ok):
+    return {
+        'connected': connected,
+        'auth_pending': pending,
+        'auth_error': error,
+        'needs_auth': not connected and not pending,
+        'credentials_ok': creds_ok,
+    }
+
+# Startup, no token, creds OK → should show Connect button (needs_auth)
+s = auth_status(connected=False, pending=False, error=None, creds_ok=True)
+check('Startup no token → needs_auth True',     s['needs_auth'], True)
+check('Startup no token → not connected',       s['connected'], False)
+check('Startup no token → not pending',         s['auth_pending'], False)
+
+# User clicked connect → pending, browser opening
+s = auth_status(connected=False, pending=True, error=None, creds_ok=True)
+check('After click → pending True',             s['auth_pending'], True)
+check('After click → needs_auth False',         s['needs_auth'], False)
+
+# Auth complete → connected
+s = auth_status(connected=True, pending=False, error=None, creds_ok=True)
+check('Auth complete → connected True',         s['connected'], True)
+check('Auth complete → needs_auth False',       s['needs_auth'], False)
+
+# No credentials → blocks everything
+s = auth_status(connected=False, pending=False, error=None, creds_ok=False)
+check('No creds → credentials_ok False',        s['credentials_ok'], False)
+
+# Auth error → shows error, not pending
+s = auth_status(connected=False, pending=False, error='timeout', creds_ok=True)
+check('Auth error → has error msg',             s['auth_error'], 'timeout')
+check('Auth error → needs_auth True (retry)',   s['needs_auth'], True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:

@@ -202,6 +202,22 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .modal-save{flex:1;padding:10px;background:var(--green);color:#071a10;border:none;border-radius:var(--rs);font-size:14px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif}
 .modal-cancel{padding:10px 16px;background:none;border:1px solid var(--border2);border-radius:var(--rs);color:var(--text2);font-size:14px;cursor:pointer;font-family:'DM Sans',sans-serif}
 .disclaimer{font-size:11px;color:var(--text3);line-height:1.7;margin-top:24px;padding-top:16px;border-top:1px solid var(--border)}
+/* Auth screen */
+.auth-screen{display:none;position:fixed;inset:0;background:var(--bg);z-index:200;align-items:center;justify-content:center;flex-direction:column}
+.auth-screen.visible{display:flex}
+.auth-card{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r);padding:40px 48px;max-width:460px;width:100%;text-align:center}
+.auth-logo{font-family:'Instrument Serif',serif;font-size:28px;margin-bottom:6px}.auth-logo span{color:var(--green)}
+.auth-tagline{font-size:13px;color:var(--text2);margin-bottom:32px}
+.auth-title{font-size:18px;font-weight:500;margin-bottom:8px}
+.auth-desc{font-size:13px;color:var(--text2);line-height:1.7;margin-bottom:28px}
+.auth-connect-btn{width:100%;height:50px;background:var(--green);color:#071a10;border:none;border-radius:var(--r);font-size:15px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:10px}
+.auth-connect-btn:hover{opacity:.88}.auth-connect-btn:disabled{opacity:.4;cursor:not-allowed}
+.auth-status-msg{font-size:13px;color:var(--text2);min-height:20px;margin-bottom:16px}
+.auth-status-msg.success{color:var(--green)}.auth-status-msg.error{color:var(--red)}.auth-status-msg.pending{color:var(--amber)}
+.auth-steps{background:var(--bg3);border-radius:var(--rs);padding:14px 18px;text-align:left;font-size:13px;color:var(--text2);line-height:2;margin-bottom:20px;display:none}
+.auth-steps.visible{display:block}
+.auth-no-creds{background:var(--rd);border:1px solid rgba(240,96,96,.3);border-radius:var(--rs);padding:12px 16px;font-size:13px;color:var(--red);line-height:1.6;margin-bottom:20px;display:none}
+.auth-no-creds.visible{display:block}
 /* Daily Review */
 .review-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:var(--blue);color:#071020;border:none;border-radius:var(--r);font-size:14px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s;margin-bottom:24px;width:100%}
 .review-btn:hover{opacity:.88}.review-btn:disabled{opacity:.35;cursor:not-allowed}
@@ -243,6 +259,39 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 </style>
 </head>
 <body>
+<!-- Auth screen — shown when no token exists -->
+<div class="auth-screen" id="authScreen">
+  <div class="auth-card">
+    <div class="auth-logo">Trade<span>Scan</span></div>
+    <div class="auth-tagline">Schwab · IBD · Live Options Data</div>
+
+    <div class="auth-no-creds" id="authNoCreds">
+      config.json not configured. Open config.json in your project folder and replace the placeholder values with your Schwab Client ID and Client Secret, then restart the app.
+    </div>
+
+    <div class="auth-title" id="authTitle">Connect to Schwab</div>
+    <div class="auth-desc" id="authDesc">Click the button below to open the Schwab login page. After you approve access, this screen will close automatically.</div>
+
+    <div class="auth-steps" id="authSteps">
+      <strong style="color:var(--text)">Complete the login in your browser:</strong><br>
+      1. A browser tab should open automatically to Schwab<br>
+      2. Log in with your Schwab credentials and click <strong style="color:var(--text)">Allow</strong><br>
+      3. You'll be redirected to a page showing a certificate warning — this is normal and safe (it's your own computer)<br>
+      &nbsp;&nbsp;&nbsp;• <strong style="color:var(--text)">Chrome/Edge:</strong> click Advanced → Proceed to 127.0.0.1<br>
+      &nbsp;&nbsp;&nbsp;• <strong style="color:var(--text)">Safari:</strong> click Show Details → visit this website<br>
+      4. Wait for the "Schwab connected" confirmation, then this screen closes automatically
+    </div>
+
+    <div class="auth-status-msg" id="authStatusMsg"></div>
+
+    <button class="auth-connect-btn" id="authConnectBtn" onclick="startAuth()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+      Connect Schwab Account
+    </button>
+    <div style="font-size:11px;color:var(--text3);line-height:1.6">Your credentials stay on your machine. This app never sends them anywhere except directly to Schwab's OAuth servers.</div>
+  </div>
+</div>
+
 <div class="shell">
   <aside class="sidebar">
     <div class="logo">
@@ -491,13 +540,134 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 let tradeLog = JSON.parse(localStorage.getItem('tradeLogv4') || '[]');
 let pendingTrade = null;
 
+// ── Auth flow ──────────────────────────────────────────────────────
+let _authPolling = false;
+
+async function checkAuthStatus() {
+  try {
+    const r = await fetch('/api/auth/status');
+    const d = await r.json();
+    const screen = document.getElementById('authScreen');
+    const noCreds = document.getElementById('authNoCreds');
+    const btn = document.getElementById('authConnectBtn');
+    const msg = document.getElementById('authStatusMsg');
+    const steps = document.getElementById('authSteps');
+
+    if (!d.credentials_ok) {
+      screen.classList.add('visible');
+      noCreds.classList.add('visible');
+      btn.disabled = true;
+      return false;
+    }
+
+    if (d.connected) {
+      screen.classList.remove('visible');
+      _authPolling = false;
+      return true;
+    }
+
+    if (d.auth_pending) {
+      screen.classList.add('visible');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
+      msg.className = 'auth-status-msg pending';
+      msg.textContent = 'Schwab login page should be open in your browser…';
+      steps.classList.add('visible');
+      if (!_authPolling) {
+        _authPolling = true;
+        pollAuthCompletion();
+      }
+      return false;
+    }
+
+    if (d.auth_error) {
+      screen.classList.add('visible');
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Try Again';
+      msg.className = 'auth-status-msg error';
+      msg.textContent = 'Error: ' + d.auth_error;
+      steps.classList.remove('visible');
+      return false;
+    }
+
+    if (d.needs_auth) {
+      screen.classList.add('visible');
+      btn.disabled = false;
+      steps.classList.remove('visible');
+      msg.textContent = '';
+      return false;
+    }
+
+    return false;
+  } catch(e) {
+    return false;
+  }
+}
+
+async function startAuth() {
+  const btn = document.getElementById('authConnectBtn');
+  const msg = document.getElementById('authStatusMsg');
+  const steps = document.getElementById('authSteps');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Starting login…';
+  msg.className = 'auth-status-msg pending';
+  msg.textContent = 'Opening Schwab login page…';
+  try {
+    const r = await fetch('/api/auth/start', {method:'POST'});
+    const d = await r.json();
+    if (d.error) {
+      msg.className = 'auth-status-msg error';
+      msg.textContent = d.error;
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Try Again';
+      return;
+    }
+    steps.classList.add('visible');
+    msg.textContent = 'A Schwab login page opened in your browser. Complete the login there.';
+    btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
+    _authPolling = true;
+    pollAuthCompletion();
+  } catch(e) {
+    msg.className = 'auth-status-msg error';
+    msg.textContent = e.message;
+    btn.disabled = false;
+  }
+}
+
+let _pollLoopActive = false;
+async function pollAuthCompletion() {
+  if (_pollLoopActive) return;  // prevent overlapping loops
+  _pollLoopActive = true;
+  for (let i = 0; i < 150; i++) {  // poll for up to 5 minutes
+    await new Promise(r => setTimeout(r, 2000));
+    const done = await checkAuthStatus();
+    if (done) {
+      _pollLoopActive = false;
+      checkStatus();  // refresh sidebar, show scanner
+      return;
+    }
+    // If auth_pending cleared without connecting, an error occurred — stop
+    if (!_authPolling) {
+      _pollLoopActive = false;
+      return;
+    }
+  }
+  // Timed out
+  const msg = document.getElementById('authStatusMsg');
+  const btn = document.getElementById('authConnectBtn');
+  if (msg) { msg.className = 'auth-status-msg error'; msg.textContent = 'Timed out waiting for login. Please try again.'; }
+  if (btn) { btn.disabled = false; btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Try Again'; }
+  _authPolling = false;
+  _pollLoopActive = false;
+}
+
 // ── Status ─────────────────────────────────────────────────────────
 async function checkStatus() {
   try {
     const r = await fetch('/api/status'); const d = await r.json();
     const el = document.getElementById('credStatus');
     let html = d.ready ? '<span style="color:var(--green)">✓ Schwab connected</span>'
-      : d.has_credentials && !d.has_token ? '<span style="color:var(--amber)">⚠ Need to authorize</span>'
+      : d.has_credentials && !d.has_token ? '<span style="color:var(--amber)">⚠ Need to reconnect</span>'
       : '<span style="color:var(--red)">✗ Check config.json</span>';
     if (d.ibd50 && d.ibd50.count > 0) {
       const upd = d.ibd50.updated ? new Date(d.ibd50.updated).toLocaleDateString() : '';
@@ -507,6 +677,8 @@ async function checkStatus() {
     } else {
       html += '<br><span style="color:var(--text3)">IBD50: not loaded</span>';
     }
+    // Add disconnect link if connected
+    html += '<br><a href="#" onclick="disconnectSchwab();return false;" style="font-size:10px;color:var(--text3)">Disconnect</a>';
     el.innerHTML = html;
     if (d.market) {
       const bar = document.getElementById('mktBar');
@@ -518,6 +690,17 @@ async function checkStatus() {
   } catch(e) {
     document.getElementById('credStatus').innerHTML = '<span style="color:var(--red)">✗ Server not running</span>';
   }
+}
+
+async function disconnectSchwab() {
+  if (!confirm('Disconnect Schwab? You will need to log in again.')) return;
+  await fetch('/api/auth/disconnect', {method:'POST'});
+  document.getElementById('authScreen').classList.add('visible');
+  const btn = document.getElementById('authConnectBtn');
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Connect Schwab Account';
+  document.getElementById('authStatusMsg').textContent = '';
+  document.getElementById('authSteps').classList.remove('visible');
 }
 
 // ── Nav ────────────────────────────────────────────────────────────
@@ -1051,8 +1234,12 @@ function renderReview(data) {
   out.innerHTML = html;
 }
 
-checkStatus();
+// Check auth first, then status
+checkAuthStatus().then(connected => {
+  if (connected) checkStatus();
+});
 setInterval(checkStatus, 60000);
+setInterval(checkAuthStatus, 5000);  // light poll to detect token expiry
 </script>
 </body>
 </html>

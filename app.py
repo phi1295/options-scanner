@@ -79,64 +79,80 @@ def schwab_call(fn, *args, retries=3, **kwargs):
 # ── Schwab client ─────────────────────────────────────────────────────────────
 _schwab_client = None
 
+# ── Auth state ───────────────────────────────────────────────────────────────
+_auth_pending = False   # True when login flow is running in background
+_auth_error   = None    # Last auth error message if any
+
 def get_client():
-    """Return existing client — initialised at startup via init_schwab()."""
+    """Return existing client."""
     return _schwab_client
 
-def init_schwab():
-    """
-    Called once at startup (blocking).
-    - If token file exists: load it silently.
-    - If no token: run manual flow — prints URL to PyCharm console,
-      waits for user to paste redirect URL back. No browser needed.
-    """
+def _try_load_token():
+    """Silently load saved token. Returns True if successful."""
     global _schwab_client
     try:
         import schwab
-        token_file = pathlib.Path(TOKEN_PATH)
+        if not pathlib.Path(TOKEN_PATH).exists():
+            return False
+        _schwab_client = schwab.auth.client_from_token_file(
+            token_path=TOKEN_PATH,
+            api_key=SCHWAB_KEY,
+            app_secret=SCHWAB_SECRET,
+            enforce_enums=False,
+        )
+        print('  ✓ Schwab token loaded successfully')
+        return True
+    except Exception as e:
+        print(f'  ⚠  Token load failed ({e}) — will require fresh login')
+        try: pathlib.Path(TOKEN_PATH).unlink(missing_ok=True)
+        except: pass
+        return False
 
-        if token_file.exists():
-            print('  Loading saved Schwab token…')
-            try:
-                _schwab_client = schwab.auth.client_from_token_file(
-                    token_path=TOKEN_PATH,
-                    api_key=SCHWAB_KEY,
-                    app_secret=SCHWAB_SECRET,
-                    enforce_enums=False,
-                )
-                print('  ✓ Schwab token loaded successfully')
-                return
-            except Exception as e:
-                print(f'  ⚠ Token load failed ({e}) — starting fresh login')
-                token_file.unlink(missing_ok=True)
+def init_schwab():
+    """
+    Called at startup. Loads token if available.
+    If no token, leaves _auth_pending=False so the UI shows the
+    Connect Schwab button (needs_auth state). The login flow only
+    starts when the user clicks Connect.
+    """
+    if not SCHWAB_KEY or not SCHWAB_SECRET or 'YOUR_CLIENT_ID' in SCHWAB_KEY:
+        print('  ⚠  Schwab credentials not set — edit config.json')
+        return
+    if _try_load_token():
+        return
+    print('  ○  No Schwab token — open the scanner and click Connect Schwab')
+    # NOTE: do NOT set _auth_pending here — it stays False so the UI
+    # shows the Connect button. It becomes True only when the user
+    # clicks Connect and the login thread actually starts.
 
-        # No valid token — manual flow
-        print()
-        print('  ┌─────────────────────────────────────────────────┐')
-        print('  │          SCHWAB LOGIN REQUIRED                   │')
-        print('  │                                                   │')
-        print('  │  1. A URL will appear below                       │')
-        print('  │  2. Copy it and open it in any browser            │')
-        print('  │  3. Log in to Schwab and click Approve            │')
-        print('  │  4. Copy the FULL URL from the browser bar        │')
-        print('  │  5. Paste it here in the console and press Enter  │')
-        print('  └─────────────────────────────────────────────────┘')
-        print()
-        _schwab_client = schwab.auth.client_from_manual_flow(
+def _login_flow_thread():
+    """
+    Runs schwab-py's client_from_login_flow in a background thread.
+    This function starts the built-in HTTPS callback server on port 8182,
+    opens the Schwab login page automatically, and saves the token.
+    The UI polls /api/auth/status to detect completion.
+    """
+    global _schwab_client, _auth_pending, _auth_error
+    try:
+        import schwab
+        print('  Starting Schwab login flow…')
+        _schwab_client = schwab.auth.client_from_login_flow(
             api_key=SCHWAB_KEY,
             app_secret=SCHWAB_SECRET,
             callback_url=CALLBACK_URL,
             token_path=TOKEN_PATH,
             enforce_enums=False,
+            interactive=False,      # don't wait for console input — open browser directly
+            callback_timeout=300.0, # wait up to 5 min for user to complete login
         )
-        print()
-        print('  ✓ Schwab authentication successful!')
-        print('  ✓ Token saved — you will not need to log in again for 7 days')
-
+        _auth_pending = False
+        _auth_error   = None
+        print('  ✓ Schwab authentication complete — token saved!')
     except Exception as e:
-        print(f'  ✗ Schwab init error: {e}')
         import traceback; traceback.print_exc()
-        _schwab_client = None
+        _auth_error   = str(e)
+        _auth_pending = False
+        print(f'  ✗ Login flow error: {e}')
 
 # ── IBD50 storage — now stores full row data ──────────────────────────────────
 IBD50_PATH = pathlib.Path(__file__).parent / 'ibd50.json'
@@ -1102,21 +1118,63 @@ def build_rationale(stock, spread, regime):
 @app.route('/')
 def index(): return send_from_directory('static','index.html')
 
+@app.route('/api/auth/status')
+def api_auth_status():
+    """Poll this to know if auth is needed / in progress / complete."""
+    connected = _schwab_client is not None
+    return jsonify({
+        'connected':      connected,
+        'auth_pending':   _auth_pending,
+        'auth_error':     _auth_error,
+        'needs_auth':     not connected and not _auth_pending,
+        'credentials_ok': bool(SCHWAB_KEY and SCHWAB_SECRET
+                               and 'YOUR_CLIENT_ID' not in SCHWAB_KEY),
+    })
+
+@app.route('/api/auth/start', methods=['POST'])
+def api_auth_start():
+    """Start the browser-based OAuth flow in a background thread."""
+    global _auth_pending, _auth_error
+    if _schwab_client:
+        return jsonify({'status': 'already_connected'})
+    if _auth_pending:
+        return jsonify({'status': 'already_pending'})
+    _auth_pending = True
+    _auth_error   = None
+    t = threading.Thread(target=_login_flow_thread, daemon=True)
+    t.start()
+    return jsonify({'status': 'started',
+                    'message': 'A Schwab login page will open in your browser. '
+                               'Log in, approve access, then return here.'})
+
+@app.route('/api/auth/disconnect', methods=['POST'])
+def api_auth_disconnect():
+    """Delete token and reset client — forces re-auth next time."""
+    global _schwab_client, _auth_pending, _auth_error
+    _schwab_client = None
+    _auth_pending  = False
+    _auth_error    = None
+    try: pathlib.Path(TOKEN_PATH).unlink(missing_ok=True)
+    except: pass
+    return jsonify({'status': 'disconnected'})
+
 @app.route('/api/status')
 def api_status():
-    has_creds=bool(SCHWAB_KEY and SCHWAB_SECRET)
-    has_token=pathlib.Path(TOKEN_PATH).exists()
-    config_ok=_config_path.exists() and 'YOUR_CLIENT_ID' not in _config.get('schwab_client_id','YOUR_CLIENT_ID')
-    client=get_client() if has_creds and has_token else None
-    mkt=market_status(client) if client else {'is_open':False,'session':'unknown','message':'Connect Schwab to check market hours.'}
-    ibd_summary={}
+    has_creds = bool(SCHWAB_KEY and SCHWAB_SECRET)
+    # Source of truth for "connected" is the live client object, not just the file
+    connected = _schwab_client is not None
+    has_token = pathlib.Path(TOKEN_PATH).exists()
+    config_ok = _config_path.exists() and 'YOUR_CLIENT_ID' not in _config.get('schwab_client_id','YOUR_CLIENT_ID')
+    client = _schwab_client
+    mkt = market_status(client) if client else {'is_open':False,'session':'unknown','message':'Connect Schwab to check market hours.'}
+    ibd_summary = {}
     if _ibd50_data:
-        rs_vals=[v.get('rs_rating') for v in _ibd50_data.values() if v.get('rs_rating')]
-        ibd_summary={'count':len(_ibd50_data),
-                     'avg_rs':round(sum(rs_vals)/len(rs_vals),1) if rs_vals else None,
-                     'updated':json.load(open(IBD50_PATH)).get('updated','') if IBD50_PATH.exists() else ''}
+        rs_vals = [v.get('rs_rating') for v in _ibd50_data.values() if v.get('rs_rating')]
+        ibd_summary = {'count':len(_ibd50_data),
+                       'avg_rs':round(sum(rs_vals)/len(rs_vals),1) if rs_vals else None,
+                       'updated':json.load(open(IBD50_PATH)).get('updated','') if IBD50_PATH.exists() else ''}
     return jsonify({'has_credentials':has_creds,'has_token':has_token,'config_file':config_ok,
-                    'ready':has_creds and has_token,'market':mkt,
+                    'ready':connected,'market':mkt,
                     'ibd50':ibd_summary,'universe_count':len(_universe_cache['symbols'])})
 
 @app.route('/api/regime')
@@ -1560,11 +1618,8 @@ if __name__=='__main__':
 
     print(f'  ✓  Rate limiter: 80 req/min')
 
-    # ── Schwab auth — MUST happen before Flask starts ─────────────────────
-    if SCHWAB_KEY and SCHWAB_SECRET and 'YOUR_CLIENT_ID' not in SCHWAB_KEY:
-        init_schwab()   # blocks until login complete or token loaded
-    else:
-        print('\n  ⚠  Skipping Schwab auth — credentials not set')
+    # ── Schwab auth — non-blocking, UI handles OAuth if needed ──────────────
+    init_schwab()  # loads token if available, sets _auth_pending if not
 
     # ── Start Flask ───────────────────────────────────────────────────────
     print(f'\n  Starting scanner at http://127.0.0.1:8080 …\n')
