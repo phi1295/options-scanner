@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Options Trade Scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0e0f11;--bg2:#15171a;--bg3:#1c1f23;--bg4:#242830;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.12);--text:#f0ede8;--text2:#8a8a8a;--text3:#444;--green:#2dd4a0;--gd:rgba(45,212,160,.12);--red:#f06060;--rd:rgba(240,96,96,.12);--blue:#60a5fa;--bd:rgba(96,165,250,.12);--amber:#f6b042;--ad:rgba(246,176,66,.12);--purple:#a78bfa;--pd:rgba(167,139,250,.12);--r:10px;--rs:6px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;min-height:100vh}
+.shell{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+.sidebar{background:var(--bg2);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+.logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.logo-mark{font-family:'Instrument Serif',serif;font-size:20px}.logo-mark span{color:var(--green)}
+.logo-sub{font-size:11px;color:var(--text2);margin-top:2px;font-family:'DM Mono',monospace;letter-spacing:.05em}
+.nav{flex:1;padding:0 10px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:var(--rs);cursor:pointer;color:var(--text2);font-size:13px;background:none;border:none;width:100%;text-align:left;transition:all .15s;margin-bottom:2px;font-family:'DM Sans',sans-serif}
+.nav-item:hover{background:var(--bg3);color:var(--text)}.nav-item.active{background:var(--bg4);color:var(--text)}
+.nav-item svg{width:15px;height:15px;flex-shrink:0}
+.nav-divider{height:1px;background:var(--border);margin:10px 12px}
+.sb-section{padding:12px;margin:0 10px 10px;background:var(--bg3);border-radius:var(--rs);border:1px solid var(--border)}
+.sb-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-family:'DM Mono',monospace;margin-bottom:6px}
+.sb-status{font-size:12px;line-height:1.7}
+.main{padding:32px 36px;overflow-y:auto}
+.page{display:none}.page.active{display:block}
+.page-header{margin-bottom:24px}
+.page-title{font-family:'Instrument Serif',serif;font-size:28px;letter-spacing:-.5px}
+.page-desc{font-size:13px;color:var(--text2);margin-top:6px;line-height:1.6}
+/* Market bar */
+.mkt-bar{border-radius:var(--rs);padding:9px 14px;margin-bottom:16px;font-size:12px;display:flex;align-items:center;gap:8px}
+.mkt-bar.open{background:var(--gd);border:1px solid rgba(45,212,160,.2);color:var(--green)}
+.mkt-bar.closed,.mkt-bar.warn{background:var(--ad);border:1px solid rgba(246,176,66,.2);color:var(--amber)}
+.mkt-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.open .mkt-dot{background:var(--green)}.closed .mkt-dot,.warn .mkt-dot{background:var(--amber)}
+/* Regime */
+.regime-banner{border-radius:var(--r);padding:15px 20px;margin-bottom:14px;border:1px solid;display:flex;align-items:center;gap:16px}
+.regime-banner.bullish{background:var(--gd);border-color:rgba(45,212,160,.25)}
+.regime-banner.bearish{background:var(--rd);border-color:rgba(240,96,96,.25)}
+.regime-banner.neutral{background:var(--pd);border-color:rgba(167,139,250,.25)}
+.regime-banner.caution{background:var(--ad);border-color:rgba(246,176,66,.25)}
+.regime-icon{font-size:22px;flex-shrink:0}
+.regime-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.08em;font-family:'DM Mono',monospace;margin-bottom:3px}
+.bullish .regime-lbl{color:var(--green)}.bearish .regime-lbl{color:var(--red)}.neutral .regime-lbl{color:var(--purple)}.caution .regime-lbl{color:var(--amber)}
+.regime-name{font-size:15px;font-weight:500}.regime-desc{font-size:12px;color:var(--text2);margin-top:3px;line-height:1.5}
+.regime-strat{margin-left:auto;text-align:right;flex-shrink:0}
+.regime-strat-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;font-family:'DM Mono',monospace;margin-bottom:4px}
+.regime-strat-val{font-size:13px;font-weight:500;padding:4px 10px;border-radius:20px;font-family:'DM Mono',monospace}
+.bullish .regime-strat-val{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.3)}
+.bearish .regime-strat-val{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.3)}
+.neutral .regime-strat-val{background:var(--pd);color:var(--purple);border:1px solid rgba(167,139,250,.3)}
+.caution .regime-strat-val{background:var(--ad);color:var(--amber);border:1px solid rgba(246,176,66,.3)}
+.signals-row{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:14px}
+.signal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rs);padding:9px 12px}
+.signal-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:4px}
+.signal-val{font-size:12px;font-weight:500;font-family:'DM Mono',monospace}
+.signal-val.bull{color:var(--green)}.signal-val.bear{color:var(--red)}.signal-val.neut{color:var(--purple)}.signal-val.warn{color:var(--amber)}
+.protection-box{background:var(--ad);border:1px solid rgba(246,176,66,.2);border-radius:var(--rs);padding:10px 14px;margin-bottom:14px}
+.protection-title{font-size:10px;color:var(--amber);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:4px}
+.protection-text{font-size:13px;color:#c9943a;line-height:1.6}
+/* Universe */
+.universe-badge{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.u-chip{background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:4px 10px;font-size:11px;color:var(--text2);font-family:'DM Mono',monospace}
+.u-chip span{color:var(--text);font-weight:500;margin-left:3px}
+/* Filters */
+.filter-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px 18px;margin-bottom:14px}
+.filter-label{font-size:11px;color:var(--text2);margin-bottom:7px}
+.filter-row{display:grid;grid-template-columns:1fr 160px;gap:10px}
+.filter-input,.filter-select{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:9px 12px;color:var(--text);font-size:13px;font-family:'DM Sans',sans-serif;width:100%}
+.filter-input:focus,.filter-select:focus{outline:none;border-color:var(--green)}
+.btn-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:24px}
+.scan-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:var(--green);color:#071a10;border:none;border-radius:var(--r);font-size:14px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s}
+.scan-btn:hover{opacity:.88}.scan-btn:disabled{opacity:.35;cursor:not-allowed}
+.regime-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:none;color:var(--text2);border:1px solid var(--border2);border-radius:var(--r);font-size:14px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s}
+.regime-btn:hover{color:var(--text);background:var(--bg2)}.regime-btn:disabled{opacity:.35;cursor:not-allowed}
+/* Trade cards */
+.scan-meta{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:12px}
+.trade-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;margin-bottom:12px}
+.trade-card.top{border-color:rgba(45,212,160,.4)}.trade-card.top-bear{border-color:rgba(240,96,96,.4)}
+.top-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;border-radius:20px;margin-bottom:10px;font-family:'DM Mono',monospace}
+.top-badge.bull{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.25)}
+.top-badge.bear{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.25)}
+.top-badge.neut{background:var(--pd);color:var(--purple);border:1px solid rgba(167,139,250,.25)}
+.card-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px}
+.ticker{font-family:'DM Mono',monospace;font-size:20px;font-weight:500}
+.company-name{font-size:13px;color:var(--text2)}
+.card-meta{font-size:12px;color:var(--text2);margin-top:3px}
+.score-pill{background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:5px 10px;text-align:right;min-width:90px}
+.score-num{font-family:'DM Mono',monospace;font-size:15px;color:var(--green)}.score-sub{font-size:11px;color:var(--text2);margin-top:1px}
+.tags{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px}
+.tag{font-size:11px;padding:3px 8px;border-radius:20px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);font-family:'DM Mono',monospace}
+.tag.ibd{background:var(--ad);color:var(--amber);border-color:rgba(246,176,66,.3);font-weight:500}
+.tag.warn{background:var(--rd);color:var(--red);border-color:rgba(240,96,96,.3)}
+/* IBD ratings panel */
+.ibd-panel{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:12px}
+.ibd-cell{background:var(--bg3);border-radius:var(--rs);padding:7px 10px;text-align:center}
+.ibd-cell-lbl{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:3px}
+.ibd-cell-val{font-size:14px;font-weight:500;font-family:'DM Mono',monospace}
+.ibd-cell-val.great{color:var(--green)}.ibd-cell-val.good{color:#8adf6a}.ibd-cell-val.ok{color:var(--text)}.ibd-cell-val.warn{color:var(--amber)}.ibd-cell-val.bad{color:var(--red)}
+/* Structure */
+.structure-box{background:var(--bg3);border-radius:var(--rs);padding:10px 14px;margin-bottom:12px;border:1px solid var(--border)}
+.struct-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:5px}
+.struct-main{font-size:14px;font-weight:500}.struct-legs{font-size:12px;color:var(--text2);margin-top:3px;font-family:'DM Mono',monospace;line-height:1.6}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+.metric{background:var(--bg3);border-radius:var(--rs);padding:8px 10px}
+.m-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-family:'DM Mono',monospace;margin-bottom:4px}
+.m-val{font-size:15px;font-weight:500;font-family:'DM Mono',monospace}.m-val.green{color:var(--green)}
+.levels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
+.level{border-radius:var(--rs);padding:10px 12px}
+.level.entry{background:var(--bd);border:1px solid rgba(96,165,250,.2)}
+.level.target{background:var(--gd);border:1px solid rgba(45,212,160,.2)}
+.level.stop{background:var(--rd);border:1px solid rgba(240,96,96,.2)}
+.lv-label{font-size:10px;text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:4px}
+.level.entry .lv-label{color:var(--blue)}.level.target .lv-label{color:var(--green)}.level.stop .lv-label{color:var(--red)}
+.lv-val{font-size:18px;font-weight:500;font-family:'DM Mono',monospace}
+.level.entry .lv-val{color:var(--blue)}.level.target .lv-val{color:var(--green)}.level.stop .lv-val{color:var(--red)}
+.lv-sub{font-size:11px;margin-top:2px;color:var(--text2)}
+.level.target .lv-sub{color:var(--green)}.level.stop .lv-sub{color:var(--red)}
+.pos-row{display:flex;gap:20px;padding:10px 0;border-top:1px solid var(--border);margin-bottom:10px;flex-wrap:wrap}
+.pos-item{font-size:12px;color:var(--text2)}.pos-item span{color:var(--text);font-weight:500;margin-left:4px;font-family:'DM Mono',monospace}
+.rationale{font-size:13px;color:var(--text2);line-height:1.65;padding-top:10px;border-top:1px solid var(--border)}
+.ibd-link{display:inline-flex;align-items:center;gap:5px;margin-top:8px;font-size:12px;color:var(--amber);text-decoration:none;border:1px solid rgba(246,176,66,.25);padding:4px 10px;border-radius:20px;background:var(--ad)}
+.ibd-link:hover{opacity:.8}
+.add-to-log-btn{width:100%;margin-top:12px;padding:8px;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s}
+.add-to-log-btn:hover{background:var(--bg4);color:var(--text)}.add-to-log-btn.added{color:var(--green);border-color:rgba(45,212,160,.3);background:var(--gd)}
+/* IBD50 page */
+.drop-zone{border:2px dashed var(--border2);border-radius:var(--r);padding:32px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:16px}
+.drop-zone:hover,.drop-zone.drag-over{border-color:var(--amber);background:var(--ad)}
+.drop-zone-icon{font-size:28px;margin-bottom:10px}
+.drop-zone h3{font-size:15px;font-weight:500;margin-bottom:6px}
+.drop-zone p{font-size:13px;color:var(--text2);line-height:1.6}
+.drop-zone input[type=file]{display:none}
+.ibd-alt-box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;margin-bottom:16px}
+.ibd-alt-box h3{font-size:14px;font-weight:500;margin-bottom:8px}
+.ibd-textarea{width:100%;min-height:100px;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:10px 12px;color:var(--text);font-family:'DM Mono',monospace;font-size:13px;resize:vertical;margin-bottom:10px}
+.ibd-textarea:focus{outline:none;border-color:var(--amber)}
+.ibd-save-btn{padding:9px 20px;background:var(--amber);color:#1a0f00;border:none;border-radius:var(--rs);font-size:13px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif}
+.ibd-save-btn:hover{opacity:.88}
+.ibd-table-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.ibd-table{width:100%;border-collapse:collapse;font-size:12px}
+.ibd-table th{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);font-weight:400;background:var(--bg3)}
+.ibd-table td{padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+.ibd-table tr:last-child td{border-bottom:none}
+.ibd-table tr:hover td{background:var(--bg3)}
+.rating-badge{display:inline-block;padding:2px 6px;border-radius:4px;font-family:'DM Mono',monospace;font-size:11px;font-weight:500}
+.rb-great{background:var(--gd);color:var(--green)}.rb-good{background:rgba(138,223,106,.12);color:#8adf6a}
+.rb-ok{background:var(--bg4);color:var(--text2)}.rb-warn{background:var(--ad);color:var(--amber)}.rb-bad{background:var(--rd);color:var(--red)}
+/* Loading/Error */
+.loading-state{padding:0}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border2);border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite;vertical-align:-3px;margin-right:8px;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading-text{font-size:13px;color:var(--text2)}.loading-sub{font-size:12px;color:var(--text3);margin-top:6px}
+/* Progress panel */
+.progress-panel{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-bottom:8px}
+.progress-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border)}
+.progress-status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2)}
+.progress-status.active{color:var(--text)}
+.progress-toggle{background:none;border:1px solid var(--border);border-radius:var(--rs);padding:4px 10px;font-size:11px;color:var(--text2);cursor:pointer;font-family:'DM Mono',monospace;transition:all .15s}
+.progress-toggle:hover{color:var(--text);border-color:var(--border2)}
+.progress-main{padding:10px 16px;min-height:36px;font-size:13px;color:var(--text);font-family:'DM Mono',monospace}
+.progress-detail{display:none;max-height:200px;overflow-y:auto;padding:8px 16px 12px;border-top:1px solid var(--border);background:var(--bg3)}
+.progress-detail.open{display:block}
+.progress-log{font-size:12px;font-family:'DM Mono',monospace;color:var(--text2);line-height:1.8}
+.progress-log .pl-success{color:var(--green)}
+.progress-log .pl-fail{color:var(--text3)}
+.progress-log .pl-info{color:var(--amber)}
+.progress-bar-wrap{height:3px;background:var(--bg3)}
+.progress-bar{height:3px;background:var(--green);transition:width .4s ease;width:0%}
+.error-box{background:var(--rd);border:1px solid rgba(240,96,96,.3);border-radius:var(--r);padding:14px 18px;color:var(--red);font-size:13px;line-height:1.6}
+.market-note{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rs);padding:10px 14px;margin-bottom:14px;font-size:13px;color:var(--text2);line-height:1.65}
+/* Log */
+.log-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:24px}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.stat-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:6px}
+.stat-val{font-size:22px;font-weight:500;font-family:'DM Mono',monospace}
+.stat-val.green{color:var(--green)}.stat-val.red{color:var(--red)}
+.log-controls{display:flex;gap:10px;margin-bottom:18px;align-items:center}
+.log-filter{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rs);padding:8px 12px;color:var(--text);font-size:13px;font-family:'DM Sans',sans-serif;cursor:pointer}
+.clear-btn{margin-left:auto;padding:8px 14px;background:none;border:1px solid var(--border);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif}
+.clear-btn:hover{border-color:var(--red);color:var(--red)}
+.log-empty{text-align:center;padding:56px 0}
+.log-table{width:100%;border-collapse:collapse}
+.log-table th{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);font-weight:400}
+.log-table td{padding:10px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
+.log-table tr:last-child td{border-bottom:none}.log-table tr:hover td{background:var(--bg2)}
+.status-sel{background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text);font-size:12px;font-family:'DM Sans',sans-serif;cursor:pointer}
+.pnl-pos{color:var(--green);font-family:'DM Mono',monospace;font-weight:500}
+.pnl-neg{color:var(--red);font-family:'DM Mono',monospace;font-weight:500}
+.del-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:2px 6px;border-radius:4px}.del-btn:hover{color:var(--red)}
+.exit-in{width:80px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:12px;font-family:'DM Mono',monospace}
+/* Modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r);padding:24px;width:440px}
+.modal h3{font-size:16px;font-weight:500;margin-bottom:16px}
+.mf{margin-bottom:13px}.mf label{font-size:12px;color:var(--text2);display:block;margin-bottom:5px}
+.mf input,.mf select,.mf textarea{width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:8px 10px;color:var(--text);font-size:13px;font-family:'DM Sans',sans-serif}
+.mf input:focus,.mf select:focus,.mf textarea:focus{outline:none;border-color:var(--green)}
+.mf textarea{resize:vertical;min-height:60px}
+.modal-actions{display:flex;gap:8px;margin-top:16px}
+.modal-save{flex:1;padding:10px;background:var(--green);color:#071a10;border:none;border-radius:var(--rs);font-size:14px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif}
+.modal-cancel{padding:10px 16px;background:none;border:1px solid var(--border2);border-radius:var(--rs);color:var(--text2);font-size:14px;cursor:pointer;font-family:'DM Sans',sans-serif}
+.disclaimer{font-size:11px;color:var(--text3);line-height:1.7;margin-top:24px;padding-top:16px;border-top:1px solid var(--border)}
+/* Daily Review */
+.review-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:var(--blue);color:#071020;border:none;border-radius:var(--r);font-size:14px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s;margin-bottom:24px;width:100%}
+.review-btn:hover{opacity:.88}.review-btn:disabled{opacity:.35;cursor:not-allowed}
+.review-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;margin-bottom:12px}
+.review-card.critical{border-color:rgba(240,96,96,.5);background:var(--rd)}
+.review-card.warn{border-color:rgba(246,176,66,.4)}
+.review-card.normal{border-color:var(--border)}
+.review-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
+.review-ticker{font-family:'DM Mono',monospace;font-size:20px;font-weight:500}
+.review-structure{font-size:12px;color:var(--text2);font-family:'DM Mono',monospace;margin-top:3px}
+.review-action{text-align:right}
+.action-badge{display:inline-block;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:500;font-family:'DM Mono',monospace}
+.action-badge.critical{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.4)}
+.action-badge.warn{background:var(--ad);color:var(--amber);border:1px solid rgba(246,176,66,.3)}
+.action-badge.normal{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.3)}
+.review-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px}
+.review-metric{background:var(--bg3);border-radius:var(--rs);padding:8px 10px}
+.rm-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-family:'DM Mono',monospace;margin-bottom:4px}
+.rm-val{font-size:15px;font-weight:500;font-family:'DM Mono',monospace}
+.rm-val.green{color:var(--green)}.rm-val.red{color:var(--red)}.rm-val.amber{color:var(--amber)}.rm-val.blue{color:var(--blue)}
+.review-detail{background:var(--bg3);border-radius:var(--rs);padding:10px 14px;font-size:13px;color:var(--text2);line-height:1.6;border-left:3px solid var(--border2)}
+.review-detail.critical{border-left-color:var(--red);color:#e08080}
+.review-detail.warn{border-left-color:var(--amber);color:#c9943a}
+.review-detail.normal{border-left-color:var(--green)}
+.review-as-of{font-size:11px;color:var(--text3);margin-bottom:16px;font-family:'DM Mono',monospace}
+.review-empty{text-align:center;padding:56px 0;color:var(--text2);font-size:14px}
+/* Instructions */
+.instructions{max-width:700px}
+.instr-section{margin-bottom:32px}
+.instr-title{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-family:'DM Mono',monospace;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.step{display:flex;gap:16px;margin-bottom:22px}
+.step-num{width:26px;height:26px;border-radius:50%;background:var(--bg3);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-family:'DM Mono',monospace;font-size:12px;color:var(--text2);flex-shrink:0;margin-top:2px}
+.step-body h3{font-size:14px;font-weight:500;margin-bottom:6px}
+.step-body p,.step-body li{font-size:13px;color:var(--text2);line-height:1.75}
+.step-body ul{padding-left:16px}
+.step-body code{font-family:'DM Mono',monospace;font-size:12px;background:var(--bg3);padding:2px 6px;border-radius:4px;color:var(--amber)}
+.code-block{background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px 16px;font-family:'DM Mono',monospace;font-size:12px;color:var(--amber);line-height:1.8;margin-top:8px;white-space:pre}
+.warn-box{background:var(--ad);border:1px solid rgba(246,176,66,.25);border-radius:var(--rs);padding:11px 14px;font-size:13px;color:#c9943a;line-height:1.65;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">Trade<span>Scan</span></div>
+      <div class="logo-sub">Schwab · IBD · Live Data</div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item active" onclick="showPage('scanner',this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>Scanner
+      </button>
+      <button class="nav-item" onclick="showPage('ibd50',this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>IBD50 Import
+      </button>
+      <button class="nav-item" onclick="showPage('review',this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6m-6 4h6M5 5h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z"/><path d="M9 5V3m6 2V3"/></svg>Daily Review
+      </button>
+      <button class="nav-item" onclick="showPage('log',this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>Trade Log
+      </button>
+      <div class="nav-divider"></div>
+      <button class="nav-item" onclick="showPage('instructions',this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>Setup Guide
+      </button>
+    </nav>
+    <div style="padding:0 10px 10px;margin-top:auto">
+      <div class="sb-section">
+        <div class="sb-label">Status</div>
+        <div class="sb-status" id="credStatus">Checking…</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- SCANNER -->
+    <div id="page-scanner" class="page active">
+      <div class="page-header">
+        <div class="page-title">Options Scanner</div>
+        <div class="page-desc">Live Schwab data + IBD50 multi-factor scoring. Regime-adaptive strategy selection. Earnings filtered automatically.</div>
+      </div>
+      <div id="mktBar" style="display:none"></div>
+      <div id="universeBadge" style="display:none"></div>
+      <div id="regimeBanner" style="display:none"></div>
+      <div id="signalsRow" style="display:none"></div>
+      <div id="protectionBox" style="display:none"></div>
+      <div class="filter-wrap">
+        <div class="filter-label">Optional: sector filter or notes (earnings auto-filtered)</div>
+        <div class="filter-row">
+          <input class="filter-input" type="text" id="filterInput" placeholder="e.g. semis only, avoid biotech…">
+          <select class="filter-select" id="sectorFilter">
+            <option value="all">All sectors</option>
+            <option value="technology">Technology</option>
+            <option value="healthcare">Healthcare</option>
+            <option value="financials">Financials</option>
+            <option value="consumer">Consumer</option>
+            <option value="industrials">Industrials</option>
+            <option value="energy">Energy</option>
+          </select>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="regime-btn" id="regimeBtn" onclick="analyzeRegime()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12h20M12 2v20"/></svg>Analyze market regime
+        </button>
+        <button class="scan-btn" id="scanBtn" onclick="runScan()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>Find my trades
+        </button>
+      </div>
+      <div id="scanOutput"></div>
+      <div class="disclaimer">Live data from Schwab API. Not financial advice. Always verify in thinkorswim before entering any position. Options trading involves substantial risk of loss.</div>
+    </div>
+
+    <!-- IBD50 -->
+    <div id="page-ibd50" class="page">
+      <div class="page-header">
+        <div class="page-title">IBD50 Import</div>
+        <div class="page-desc">Upload your IBD50 XLS export directly — all 24 columns are parsed and used for scoring. Update weekly.</div>
+      </div>
+      <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()"
+           ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
+        <input type="file" id="fileInput" accept=".xls,.xlsx,.csv" onchange="handleFileSelect(event)">
+        <div class="drop-zone-icon">📊</div>
+        <h3>Drop your IBD50 XLS file here</h3>
+        <p>Or click to browse. Accepts the XLS export directly from ibd.com.<br>All IBD ratings (RS, EPS, Composite, ACC/DIS, % off High, etc.) are parsed automatically.</p>
+      </div>
+      <div id="uploadStatus" style="margin-bottom:16px;font-size:13px"></div>
+      <div class="ibd-alt-box">
+        <h3>Or paste tickers manually</h3>
+        <textarea class="ibd-textarea" id="ibd50Input" placeholder="NVDA, AAPL, META, LLY&#10;(tickers only — no ratings data, but still prioritized in scan)"></textarea>
+        <button class="ibd-save-btn" onclick="saveIBD50Text()">Save tickers</button>
+      </div>
+      <div id="ibd50TableWrap"></div>
+    </div>
+
+    <!-- DAILY REVIEW -->
+    <div id="page-review" class="page">
+      <div class="page-header">
+        <div class="page-title">Daily Review</div>
+        <div class="page-desc">Live spread prices for all open positions. Run each morning before market open and again at midday.</div>
+      </div>
+      <button class="review-btn" id="reviewBtn" onclick="runReview()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+        Refresh live prices
+      </button>
+      <div id="reviewOutput"></div>
+    </div>
+
+    <!-- LOG -->
+    <div id="page-log" class="page">
+      <div class="page-header">
+        <div class="page-title">Trade Log</div>
+        <div class="page-desc">Track every position. Enter exit price to calculate P&L automatically.</div>
+      </div>
+      <div class="log-stats" id="logStats"></div>
+      <div class="log-controls">
+        <select class="log-filter" id="logFilter" onchange="renderLog()">
+          <option value="all">All trades</option>
+          <option value="open">Open</option>
+          <option value="won">Winners</option>
+          <option value="lost">Losers</option>
+          <option value="expired">Expired</option>
+        </select>
+        <button class="clear-btn" onclick="clearLog()">Clear all</button>
+      </div>
+      <div id="logContent"></div>
+    </div>
+
+    <!-- INSTRUCTIONS -->
+    <div id="page-instructions" class="page">
+      <div class="page-header">
+        <div class="page-title">Setup Guide</div>
+        <div class="page-desc">Complete setup, IBD50 import, and daily workflow.</div>
+      </div>
+      <div class="instructions">
+        <div class="instr-section">
+          <div class="instr-title">One-time setup</div>
+          <div class="step"><div class="step-num">1</div><div class="step-body">
+            <h3>Install Python packages</h3>
+            <div class="code-block">pip install flask schwab-py pandas numpy requests lxml</div>
+            <p style="margin-top:8px">The <code>lxml</code> package is required for fetching the S&P 500 and Nasdaq 100 universe from Wikipedia.</p>
+          </div></div>
+          <div class="step"><div class="step-num">2</div><div class="step-body">
+            <h3>Edit config.json</h3>
+            <p>Open <code>config.json</code> and replace the placeholders with your Schwab Client ID and Client Secret from the Schwab Developer Portal. This file is never overwritten by updates.</p>
+          </div></div>
+          <div class="step"><div class="step-num">3</div><div class="step-body">
+            <h3>First launch — Schwab authentication</h3>
+            <p>Run <code>python app.py</code> from PyCharm (use the Run button, not Terminal, to ensure the virtual environment is active). The PyCharm console will print a Schwab login URL and show these instructions:</p>
+            <div class="code-block">1. A URL will appear below
+2. Copy it and open it in any browser
+3. Log in to Schwab and click Approve
+4. Copy the FULL URL from the browser bar
+5. Paste it here in the console and press Enter</div>
+            <p style="margin-top:8px">Token saves for 7 days. Re-authenticate weekly by deleting <code>schwab_token.json</code> and restarting.</p>
+            <div class="warn-box">Callback URL in the Schwab Developer Portal must be exactly <code>https://127.0.0.1:8182</code> — no trailing slash.</div>
+          </div></div>
+        </div>
+        <div class="instr-section">
+          <div class="instr-title">IBD50 import (weekly, every Monday)</div>
+          <div class="step"><div class="step-num">4</div><div class="step-body">
+            <h3>Export from ibd.com</h3>
+            <p>Go to ibd.com → IBD50 → click the Export/Download button to get the XLS file. Drag it onto the IBD50 Import tab. All 24 columns are parsed automatically — RS Rating, EPS Rating, Composite, ACC/DIS, % off High, earnings growth, and more. These feed directly into the setup score.</p>
+          </div></div>
+          <div class="step"><div class="step-num">5</div><div class="step-body">
+            <h3>What the IBD data does</h3>
+            <ul>
+              <li><strong>RS Rating</strong> — uses IBD's actual rating instead of a price-based proxy</li>
+              <li><strong>ACC/DIS D or E</strong> — stock automatically excluded even if RS is high</li>
+              <li><strong>% off High &gt;35%</strong> — excluded in bullish regime (stock is in a downtrend)</li>
+              <li><strong>IBD Rank 1–10</strong> — gets highest score bonus vs rank 40–50</li>
+              <li><strong>Composite + EPS</strong> — both contribute to the setup score</li>
+              <li><strong>IBD50 stocks screened first</strong> — always appear at the top of scan results</li>
+            </ul>
+          </div></div>
+        </div>
+        <div class="instr-section">
+          <div class="instr-title">Entering trades in thinkorswim</div>
+          <div class="step"><div class="step-num">6</div><div class="step-body">
+            <h3>Enter as a single vertical spread</h3>
+            <ul>
+              <li>Trade tab → type the ticker → open the Options Chain</li>
+              <li>Find the expiration date shown on the trade card</li>
+              <li>Click the <strong>Ask</strong> on your buy strike (e.g. $525)</li>
+              <li>Hold <strong>Ctrl</strong> and click the <strong>Bid</strong> on your sell strike (e.g. $535)</li>
+              <li>Order ticket must say <strong>BUY +1 VERTICAL</strong> — not SELL</li>
+              <li>Set as <strong>Limit</strong> order at the net debit shown on the card</li>
+            </ul>
+            <div class="warn-box">Always verify the order says BUY VERTICAL before sending. If it says SELL, click the Buy/Sell toggle to flip it.</div>
+          </div></div>
+          <div class="step"><div class="step-num">7</div><div class="step-body">
+            <h3>Set your profit target after entry</h3>
+            <ul>
+              <li>After your spread fills, right-click the position in Monitor → Activity and Positions</li>
+              <li>Select <strong>Create Closing Order → Sell the vertical to close</strong></li>
+              <li>Set price to your profit target from the trade card</li>
+              <li>Set order type to <strong>Limit GTC</strong> (Good Till Cancelled)</li>
+              <li>Do NOT create a second order for your stop loss — manage the stop manually</li>
+            </ul>
+          </div></div>
+        </div>
+        <div class="instr-section">
+          <div class="instr-title">Daily workflow</div>
+          <div class="step"><div class="step-num">8</div><div class="step-body">
+            <h3>Run the scanner 10am–3:30pm ET</h3>
+            <p>Options liquidity peaks mid-session. Use the sector filter to focus on specific sectors. The market hours bar shows live status from Schwab.</p>
+          </div></div>
+          <div class="step"><div class="step-num">9</div><div class="step-body">
+            <h3>Morning and midday — check Daily Review</h3>
+            <p>Open the <strong>Daily Review</strong> tab and click Refresh. It fetches live spread prices from Schwab for all your open positions and tells you exactly what to do with each one. Actions include:</p>
+            <ul>
+              <li><strong style="color:#f06060">CLOSE — TARGET HIT</strong> — sell vertical immediately</li>
+              <li><strong style="color:#f06060">CLOSE — STOP HIT</strong> — cancel profit target, close at market</li>
+              <li><strong style="color:#f06060">CLOSE — 21 DTE RULE</strong> — time decay rule, close regardless of P&L</li>
+              <li><strong style="color:#f6b042">WATCH — APPROACHING STOP</strong> — monitor closely</li>
+              <li><strong style="color:#2dd4a0">HOLD</strong> — between levels, nothing to do</li>
+            </ul>
+          </div></div>
+          <div class="step"><div class="step-num">10</div><div class="step-body">
+            <h3>Exit rules — follow every time</h3>
+            <ul>
+              <li>Close at profit target (50% of max profit) — the Daily Review will flag this</li>
+              <li>Close at stop loss (50% of debit paid) — no exceptions, no hoping for recovery</li>
+              <li>Close at <strong>21 DTE</strong> — theta decay accelerates sharply after this point</li>
+              <li>Never hold through earnings — the scanner filters these but always verify</li>
+              <li>If the market regime flips against your position, close immediately</li>
+              <li>Add every trade to the Trade Log so Daily Review can track it</li>
+            </ul>
+          </div></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-overlay" id="logModal">
+  <div class="modal">
+    <h3>Add to trade log</h3>
+    <div id="modalContent"></div>
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeModal()">Cancel</button>
+      <button class="modal-save" onclick="saveToLog()">Save trade</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let tradeLog = JSON.parse(localStorage.getItem('tradeLogv4') || '[]');
+let pendingTrade = null;
+
+// ── Status ─────────────────────────────────────────────────────────
+async function checkStatus() {
+  try {
+    const r = await fetch('/api/status'); const d = await r.json();
+    const el = document.getElementById('credStatus');
+    let html = d.ready ? '<span style="color:var(--green)">✓ Schwab connected</span>'
+      : d.has_credentials && !d.has_token ? '<span style="color:var(--amber)">⚠ Need to authorize</span>'
+      : '<span style="color:var(--red)">✗ Check config.json</span>';
+    if (d.ibd50 && d.ibd50.count > 0) {
+      const upd = d.ibd50.updated ? new Date(d.ibd50.updated).toLocaleDateString() : '';
+      html += `<br><span style="color:var(--amber)">IBD50: ${d.ibd50.count} stocks</span>`;
+      if (d.ibd50.avg_rs) html += `<br><span style="color:var(--text3)">Avg RS ${d.ibd50.avg_rs}</span>`;
+      if (upd) html += `<br><span style="color:var(--text3)">${upd}</span>`;
+    } else {
+      html += '<br><span style="color:var(--text3)">IBD50: not loaded</span>';
+    }
+    el.innerHTML = html;
+    if (d.market) {
+      const bar = document.getElementById('mktBar');
+      const cls = d.market.session === 'regular' ? 'open' : d.market.session === 'pre' ? 'warn' : 'closed';
+      bar.className = 'mkt-bar ' + cls;
+      bar.innerHTML = `<div class="mkt-dot"></div>${d.market.message}`;
+      bar.style.display = 'flex';
+    }
+  } catch(e) {
+    document.getElementById('credStatus').innerHTML = '<span style="color:var(--red)">✗ Server not running</span>';
+  }
+}
+
+// ── Nav ────────────────────────────────────────────────────────────
+function showPage(name, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  if (btn) btn.classList.add('active');
+  if (name === 'log') renderLog();
+  if (name === 'ibd50') loadIBD50Table();
+}
+
+// ── Regime ─────────────────────────────────────────────────────────
+async function analyzeRegime() {
+  const btn = document.getElementById('regimeBtn');
+  btn.disabled = true; btn.textContent = 'Analyzing…';
+  ['regimeBanner','signalsRow','protectionBox'].forEach(id => document.getElementById(id).style.display = 'none');
+  try {
+    const r = await fetch('/api/regime'); const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    renderRegime(d);
+  } catch(e) {
+    document.getElementById('regimeBanner').innerHTML = `<div class="error-box">${e.message}</div>`;
+    document.getElementById('regimeBanner').style.display = 'block';
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12h20M12 2v20"/></svg> Re-analyze regime';
+}
+
+function renderRegime(d) {
+  const icons = {bullish:'↑',bearish:'↓',neutral:'↔',caution:'⚠'};
+  const b = document.getElementById('regimeBanner');
+  b.className = 'regime-banner ' + d.regime; b.style.display = 'flex';
+  b.innerHTML = `<div class="regime-icon">${icons[d.regime]||'~'}</div>
+    <div><div class="regime-lbl">Market regime</div><div class="regime-name">${d.regime_name}</div>
+    <div class="regime-desc">${d.regime_desc}</div></div>
+    <div class="regime-strat"><div class="regime-strat-lbl">Strategy</div>
+    <div class="regime-strat-val">${d.recommended_strategy_short}</div></div>`;
+  const sigs = d.signals;
+  const labels = {spy_trend:'SPY',vix:'VIX',market_breadth:'Trend',sector_rotation:'Rotation',momentum:'Momentum'};
+  let sh = '<div class="signals-row">';
+  Object.keys(sigs).forEach(k => {
+    sh += `<div class="signal"><div class="signal-lbl">${labels[k]||k}</div><div class="signal-val ${sigs[k].signal}">${sigs[k].value}</div></div>`;
+  });
+  sh += '</div>';
+  const sr = document.getElementById('signalsRow'); sr.innerHTML = sh; sr.style.display = 'block';
+  if (d.protection_note) {
+    const pb = document.getElementById('protectionBox');
+    pb.className = 'protection-box';
+    pb.innerHTML = `<div class="protection-title">Position sizing</div><div class="protection-text">${d.protection_note}</div>`;
+    pb.style.display = 'block';
+  }
+}
+
+// ── Scanner ────────────────────────────────────────────────────────
+let _detailOpen = false;
+
+function toggleDetail() {
+  _detailOpen = !_detailOpen;
+  const d = document.getElementById('progressDetail');
+  const t = document.getElementById('progressToggle');
+  if (d) { d.classList.toggle('open', _detailOpen); }
+  if (t) { t.textContent = _detailOpen ? 'Hide detail' : 'Show detail'; }
+}
+
+function updateProgress(msg, detail, pct) {
+  const panel = document.getElementById('progressPanel');
+  if (!panel) return;
+  if (!detail) {
+    const main = document.getElementById('progressMain');
+    if (main) main.innerHTML = `<span class="spinner"></span>${msg}`;
+    const bar = document.getElementById('progressBar');
+    if (bar && pct !== undefined) bar.style.width = pct + '%';
+  }
+  // Always add to detail log
+  const log = document.getElementById('progressLog');
+  if (log) {
+    const cls = msg.startsWith('✓') ? 'pl-success' : msg.startsWith('✗') ? 'pl-fail' : 'pl-info';
+    const line = document.createElement('div');
+    line.className = cls;
+    line.textContent = msg;
+    log.appendChild(line);
+    log.parentElement.scrollTop = log.parentElement.scrollHeight;
+  }
+}
+
+async function runScan() {
+  const btn = document.getElementById('scanBtn');
+  const out = document.getElementById('scanOutput');
+  const sector = document.getElementById('sectorFilter').value;
+  btn.disabled = true;
+  _detailOpen = false;
+
+  // Show progress panel
+  out.innerHTML = `
+    <div class="progress-panel" id="progressPanel">
+      <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="progress-header">
+        <div class="progress-status active" id="progressMain">
+          <span class="spinner"></span>Connecting to Schwab…
+        </div>
+        <button class="progress-toggle" id="progressToggle" onclick="toggleDetail()">Show detail</button>
+      </div>
+      <div class="progress-detail" id="progressDetail">
+        <div class="progress-log" id="progressLog"></div>
+      </div>
+    </div>`;
+
+  // Start SSE progress stream
+  let sse = null;
+  let pct = 0;
+  const pctSteps = {
+    'Fetching': 5, 'Detecting market': 15, 'Regime:': 20,
+    'Universe ready': 25, 'Screening stocks… 10': 35,
+    'Screening stocks… 20': 45, 'Screening stocks… 30': 55,
+    'Screening stocks… 40': 65, 'Screening stocks… 50': 70,
+    'Screening done': 75, 'Building spread': 80,
+    '✓': 90, 'Scan complete': 99
+  };
+  try {
+    sse = new EventSource('/api/progress');
+    sse.onmessage = (e) => {
+      try {
+        const item = JSON.parse(e.data);
+        if (item.msg === 'ready' || item.msg === 'done') return;
+        // Determine progress %
+        for (const [key, p] of Object.entries(pctSteps)) {
+          if (item.msg.startsWith(key) && p > pct) { pct = p; break; }
+        }
+        updateProgress(item.msg, item.detail, pct);
+      } catch {}
+    };
+  } catch(e) { /* SSE not supported — fallback to plain spinner */ }
+
+  try {
+    const r = await fetch(`/api/scan?sector=${encodeURIComponent(sector)}`);
+    const d = await r.json();
+    if (sse) { sse.close(); sse = null; }
+    if (d.error) { out.innerHTML = `<div class="error-box">${d.error}</div>`; btn.disabled=false; return; }
+    if (d.regime) renderRegime(d.regime);
+    if (d.universe_meta) {
+      const m = d.universe_meta; const ub = document.getElementById('universeBadge');
+      ub.className = 'universe-badge';
+      ub.innerHTML = `<div class="u-chip">Screened<span>${d.screened}</span></div>
+        <div class="u-chip">Passed<span>${d.candidates_found}</span></div>
+        <div class="u-chip">IBD50<span>${m.ibd50}</span></div>
+        <div class="u-chip">Movers<span>${m.movers}</span></div>
+        <div class="u-chip">SP500+NDX<span>${m.sp500_ndx}</span></div>`;
+      ub.style.display = 'flex';
+    }
+    renderTrades(d);
+  } catch(e) {
+    if (sse) { sse.close(); sse = null; }
+    out.innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+  btn.disabled = false;
+}
+
+// ── Rating helpers ─────────────────────────────────────────────────
+function ratingClass(val, thresholds) {
+  if (val === null || val === undefined) return 'ok';
+  const v = parseFloat(val);
+  if (isNaN(v)) return 'ok';
+  if (v >= thresholds[0]) return 'great';
+  if (v >= thresholds[1]) return 'good';
+  if (v >= thresholds[2]) return 'ok';
+  if (v >= thresholds[3]) return 'warn';
+  return 'bad';
+}
+function accDisClass(r) {
+  if (!r || r==='--') return 'ok';
+  if (['A+','A','A-'].includes(r)) return 'great';
+  if (['B+','B','B-'].includes(r)) return 'good';
+  if (['C+','C','C-'].includes(r)) return 'ok';
+  if (['D+','D'].includes(r)) return 'warn';
+  return 'bad';
+}
+
+function renderTrades(data) {
+  const out = document.getElementById('scanOutput');
+  let html = `<div class="market-note">${data.market_context}</div>`;
+  html += `<div class="scan-meta">${data.trades.length} setups · ${data.scan_date} · Live data · Earnings filtered</div>`;
+  const regime = data.regime?.regime || 'bullish';
+  const sc = regime==='bearish'?'bear':regime==='neutral'?'neut':'bull';
+
+  data.trades.forEach(t => {
+    const isTop = t.top_pick;
+    html += `<div class="trade-card ${isTop?(sc==='bear'?'top-bear':'top'):''}">`;
+    if (isTop) html += `<div class="top-badge ${sc}">★ top pick</div>`;
+    html += `<div class="card-header">
+      <div>
+        <div style="display:flex;align-items:baseline;gap:8px">
+          <span class="ticker">${t.ticker}</span>
+          <span class="company-name">${t.company !== t.ticker ? t.company : ''}</span>
+        </div>
+        <div class="card-meta">$${t.stock_price.toFixed(2)}</div>
+      </div>
+      <div class="score-pill">
+        <div class="score-num">${t.setup_score}/100</div>
+        <div class="score-sub">${t.ibd_rank ? `IBD #${t.ibd_rank}` : 'screened'}</div>
+      </div>
+    </div>`;
+
+    // Tags
+    html += `<div class="tags">`;
+    (t.tags||[]).forEach(tag => {
+      const isIBD = tag.startsWith('IBD50');
+      const isWarn = tag.includes('D+') || tag.includes('D ') || tag === 'E';
+      html += `<span class="tag ${isIBD?'ibd':isWarn?'warn':''}">${tag}</span>`;
+    });
+    html += `</div>`;
+
+    // IBD Ratings panel (shown only if IBD data available)
+    if (t.ibd_rs || t.ibd_eps || t.ibd_composite || t.ibd_acc_dis) {
+      html += `<div class="ibd-panel">`;
+      if (t.ibd_rs !== null && t.ibd_rs !== undefined)
+        html += `<div class="ibd-cell"><div class="ibd-cell-lbl">RS Rating</div><div class="ibd-cell-val ${ratingClass(t.ibd_rs,[97,92,85,75])}">${t.ibd_rs}</div></div>`;
+      if (t.ibd_composite !== null && t.ibd_composite !== undefined)
+        html += `<div class="ibd-cell"><div class="ibd-cell-lbl">Composite</div><div class="ibd-cell-val ${ratingClass(t.ibd_composite,[97,90,80,70])}">${t.ibd_composite}</div></div>`;
+      if (t.ibd_eps !== null && t.ibd_eps !== undefined)
+        html += `<div class="ibd-cell"><div class="ibd-cell-lbl">EPS Rating</div><div class="ibd-cell-val ${ratingClass(t.ibd_eps,[90,80,70,60])}">${t.ibd_eps}</div></div>`;
+      if (t.ibd_acc_dis && t.ibd_acc_dis !== '--')
+        html += `<div class="ibd-cell"><div class="ibd-cell-lbl">ACC/DIS</div><div class="ibd-cell-val ${accDisClass(t.ibd_acc_dis)}">${t.ibd_acc_dis}</div></div>`;
+      if (t.ibd_pct_off_high !== null && t.ibd_pct_off_high !== undefined)
+        html += `<div class="ibd-cell"><div class="ibd-cell-lbl">% off High</div><div class="ibd-cell-val ${ratingClass(-Math.abs(t.ibd_pct_off_high),[-5,-15,-25,-35])}">${Math.abs(t.ibd_pct_off_high).toFixed(1)}%</div></div>`;
+      html += `</div>`;
+    }
+
+    html += `<div class="structure-box"><div class="struct-label">Trade · ${t.dte} DTE · Exp ${t.expiration}</div>
+      <div class="struct-main">${(t.strategy_type||'').replace(/_/g,' ')}</div>
+      <div class="struct-legs">${t.buy_leg}<br>${t.sell_leg}</div></div>`;
+
+    html += `<div class="metrics">
+      <div class="metric"><div class="m-lbl">Net debit</div><div class="m-val">$${t.net_debit.toFixed(2)}</div></div>
+      <div class="metric"><div class="m-lbl">Max profit</div><div class="m-val">$${t.max_profit.toFixed(2)}</div></div>
+      <div class="metric"><div class="m-lbl">Breakeven</div><div class="m-val">$${t.breakeven.toFixed(2)}</div></div>
+      <div class="metric"><div class="m-lbl">Return</div><div class="m-val green">+${t.return_on_debit}%</div></div>
+    </div>`;
+
+    html += `<div class="levels">
+      <div class="level entry"><div class="lv-label">Entry</div><div class="lv-val">$${t.entry.toFixed(2)}</div></div>
+      <div class="level target"><div class="lv-label">Profit target</div><div class="lv-val">$${t.profit_target.toFixed(2)}</div><div class="lv-sub">+${t.return_on_debit}% return</div></div>
+      <div class="level stop"><div class="lv-label">Stop loss</div><div class="lv-val">$${t.stop_loss.toFixed(2)}</div><div class="lv-sub">no exceptions</div></div>
+    </div>`;
+
+    html += `<div class="pos-row">
+      <div class="pos-item">Contracts/$10k<span>${t.contracts_per_10k}</span></div>
+      <div class="pos-item">Capital at risk<span>$${t.capital_at_risk}</span></div>
+      <div class="pos-item">Open interest<span>${t.open_interest}</span></div>
+      ${t.iv !== '—' ? `<div class="pos-item">IV<span>${t.iv}%</span></div>` : ''}
+      <div class="pos-item">Max loss<span style="color:var(--red)">$${(t.net_debit*100*t.contracts_per_10k).toFixed(0)}</span></div>
+    </div>`;
+
+    html += `<div class="rationale">${t.rationale}
+<br><a class="ibd-link" href="${t.ibd_lookup}" target="_blank">↗ ${t.ibd_rs ? 'View on IBD (RS ' + t.ibd_rs + ')' : 'Verify RS on IBD'}</a></div>`;
+    html += `<button class="add-to-log-btn" id="logbtn-${t.ticker}" onclick='openModal(${JSON.stringify(t).replace(/</g,"&lt;").replace(/'/g,"&#39;")})'>+ Add to trade log</button>`;
+    html += `</div>`;
+  });
+  out.innerHTML = html;
+}
+
+// ── IBD50 Upload ───────────────────────────────────────────────────
+function handleDragOver(e) { e.preventDefault(); document.getElementById('dropZone').classList.add('drag-over'); }
+function handleDragLeave(e) { document.getElementById('dropZone').classList.remove('drag-over'); }
+function handleDrop(e) {
+  e.preventDefault(); document.getElementById('dropZone').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) uploadIBDFile(file);
+}
+function handleFileSelect(e) { if (e.target.files[0]) uploadIBDFile(e.target.files[0]); }
+
+async function uploadIBDFile(file) {
+  const status = document.getElementById('uploadStatus');
+  status.innerHTML = `<span style="color:var(--amber)">⏳ Parsing ${file.name}…</span>`;
+  try {
+    const formData = new FormData(); formData.append('file', file);
+    const r = await fetch(`/api/ibd50?filename=${encodeURIComponent(file.name)}`, {method:'POST', body: formData});
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    status.innerHTML = `<span style="color:var(--green)">✓ Imported ${d.saved} stocks from ${file.name}</span>`;
+    loadIBD50Table(); checkStatus();
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+  }
+}
+
+async function saveIBD50Text() {
+  const text = document.getElementById('ibd50Input').value.trim();
+  if (!text) return;
+  const r = await fetch('/api/ibd50', {method:'POST', headers:{'Content-Type':'text/plain'}, body: text});
+  const d = await r.json();
+  if (d.saved) {
+    document.getElementById('uploadStatus').innerHTML = `<span style="color:var(--green)">✓ Saved ${d.saved} tickers</span>`;
+    document.getElementById('ibd50Input').value = '';
+    loadIBD50Table(); checkStatus();
+  }
+}
+
+async function loadIBD50Table() {
+  const wrap = document.getElementById('ibd50TableWrap');
+  try {
+    const r = await fetch('/api/ibd50'); const d = await r.json();
+    if (!d.stocks || !d.stocks.length) {
+      wrap.innerHTML = '<p style="color:var(--text2);font-size:13px;padding:16px 0">No IBD50 data loaded yet. Upload your XLS export above.</p>';
+      return;
+    }
+    const upd = d.updated ? `Updated ${new Date(d.updated).toLocaleString()}` : '';
+    let html = `<div style="font-size:12px;color:var(--text2);margin-bottom:10px">${d.count} stocks · ${upd}</div>`;
+    html += `<div class="ibd-table-wrap"><table class="ibd-table"><thead><tr>
+      <th>#</th><th>Ticker</th><th>Company</th><th>Price</th><th>RS</th><th>EPS</th><th>Composite</th><th>ACC/DIS</th><th>SMR</th><th>% off High</th><th>Vol Chg</th>
+    </tr></thead><tbody>`;
+    d.stocks.forEach(s => {
+      const rs = s.rs_rating, comp = s.composite, eps = s.eps_rating;
+      const acc = s.acc_dis || '--', poh = s.pct_off_high;
+      html += `<tr>
+        <td style="font-family:'DM Mono',monospace;color:var(--text3)">${s.rank||'—'}</td>
+        <td><strong style="font-family:'DM Mono',monospace">${s.symbol}</strong></td>
+        <td style="color:var(--text2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.company||''}</td>
+        <td style="font-family:'DM Mono',monospace">${s.price ? '$'+s.price.toFixed(2) : '—'}</td>
+        <td><span class="rating-badge rb-${ratingClass(rs,[97,92,85,75])}">${rs||'—'}</span></td>
+        <td><span class="rating-badge rb-${ratingClass(eps,[90,80,70,60])}">${eps||'—'}</span></td>
+        <td><span class="rating-badge rb-${ratingClass(comp,[97,90,80,70])}">${comp||'—'}</span></td>
+        <td><span class="rating-badge rb-${accDisClass(acc)}">${acc}</span></td>
+        <td style="color:var(--text2)">${s.smr||'—'}</td>
+        <td style="font-family:'DM Mono',monospace;color:${poh && Math.abs(poh)>25?'var(--red)':'var(--text2)'}">${poh !== null && poh !== undefined ? Math.abs(poh).toFixed(1)+'%' : '—'}</td>
+        <td style="font-family:'DM Mono',monospace;color:${s.vol_chg>50?'var(--green)':'var(--text2)'}">${s.vol_chg !== null && s.vol_chg !== undefined ? (s.vol_chg>0?'+':'')+s.vol_chg+'%' : '—'}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+    wrap.innerHTML = html;
+  } catch(e) { wrap.innerHTML = '<p style="color:var(--red);font-size:13px">Could not load IBD50 data.</p>'; }
+}
+
+// ── Modal ──────────────────────────────────────────────────────────
+function openModal(trade) {
+  if (typeof trade === 'string') trade = JSON.parse(trade);
+  pendingTrade = trade;
+  const today = new Date().toISOString().split('T')[0];
+  document.getElementById('modalContent').innerHTML = `
+    <div class="mf"><label>Ticker</label><input type="text" value="${trade.ticker}" readonly></div>
+    <div class="mf"><label>Structure</label><input type="text" value="${trade.buy_leg}" readonly></div>
+    <div class="mf"><label>Expiration</label><input type="text" value="${trade.expiration}" readonly></div>
+    <div class="mf"><label>Entry date</label><input type="date" id="m_date" value="${today}"></div>
+    <div class="mf"><label>Contracts</label><input type="number" id="m_contracts" value="${trade.contracts_per_10k}" min="1"></div>
+    <div class="mf"><label>Actual debit paid</label><input type="number" id="m_debit" value="${trade.net_debit}" step="0.01"></div>
+    <div class="mf"><label>Notes</label><textarea id="m_notes" placeholder="Why you took this…"></textarea></div>`;
+  document.getElementById('logModal').classList.add('open');
+}
+function closeModal() { document.getElementById('logModal').classList.remove('open'); pendingTrade=null; }
+function saveToLog() {
+  if (!pendingTrade) return;
+  tradeLog.unshift({
+    id:Date.now(), ticker:pendingTrade.ticker, company:pendingTrade.company||pendingTrade.ticker,
+    structure:pendingTrade.buy_leg+' / '+pendingTrade.sell_leg,
+    expiration:pendingTrade.expiration,
+    entryDate:document.getElementById('m_date').value,
+    contracts:parseInt(document.getElementById('m_contracts').value),
+    debit:parseFloat(document.getElementById('m_debit').value),
+    target:pendingTrade.profit_target, stop:pendingTrade.stop_loss,
+    returnPct:pendingTrade.return_on_debit, notes:document.getElementById('m_notes').value,
+    status:'open', exitPrice:null, pnl:null,
+    ibd_rs: pendingTrade.ibd_rs, ibd_score: pendingTrade.setup_score,
+  });
+  localStorage.setItem('tradeLogv4', JSON.stringify(tradeLog));
+  closeModal();
+  const b = document.getElementById('logbtn-'+pendingTrade.ticker);
+  if (b) { b.textContent='✓ Added'; b.classList.add('added'); b.disabled=true; }
+}
+
+// ── Log ────────────────────────────────────────────────────────────
+function renderLog() {
+  const filter = document.getElementById('logFilter').value;
+  const filtered = filter==='all'?tradeLog:tradeLog.filter(t=>t.status===filter);
+  const closed=tradeLog.filter(t=>t.status==='won'||t.status==='lost');
+  const won=tradeLog.filter(t=>t.status==='won').length;
+  const wr=closed.length?Math.round(won/closed.length*100):0;
+  const pnl=tradeLog.reduce((s,t)=>s+(t.pnl||0),0);
+  const open=tradeLog.filter(t=>t.status==='open').length;
+  document.getElementById('logStats').innerHTML=`
+    <div class="stat-card"><div class="stat-lbl">Total</div><div class="stat-val">${tradeLog.length}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Win rate</div><div class="stat-val ${wr>=50?'green':'red'}">${wr}%</div></div>
+    <div class="stat-card"><div class="stat-lbl">Open</div><div class="stat-val">${open}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Total P&L</div><div class="stat-val ${pnl>=0?'green':'red'}">${pnl>=0?'+':''}$${pnl.toFixed(0)}</div></div>`;
+  if (!filtered.length) { document.getElementById('logContent').innerHTML='<div class="log-empty"><p style="color:var(--text2);font-size:14px">No trades yet.</p></div>'; return; }
+  let html=`<table class="log-table"><thead><tr><th>Ticker</th><th>Structure</th><th>Date</th><th>Debit</th><th>Target</th><th>Stop</th><th>Qty</th><th>IBD RS</th><th>Status</th><th>Exit</th><th>P&L</th><th></th></tr></thead><tbody>`;
+  filtered.forEach(t=>{
+    const pnlCell=t.pnl!==null?`<span class="${t.pnl>=0?'pnl-pos':'pnl-neg'}">${t.pnl>=0?'+':''}$${t.pnl.toFixed(0)}</span>`:'—';
+    const exitCell=t.exitPrice!==null?`<span style="font-family:'DM Mono',monospace;font-size:12px">$${t.exitPrice.toFixed(2)}</span>`:`<input class="exit-in" type="number" placeholder="0.00" step="0.01" onchange="updatePnl(${t.id},this.value,${t.debit},${t.contracts})">`;
+    html+=`<tr>
+      <td><strong style="font-family:'DM Mono',monospace">${t.ticker}</strong><br><span style="font-size:11px;color:var(--text2)">${t.expiration}</span></td>
+      <td style="font-size:11px;color:var(--text2);font-family:'DM Mono',monospace;max-width:140px">${t.structure}</td>
+      <td style="color:var(--text2)">${t.entryDate}</td>
+      <td style="font-family:'DM Mono',monospace">$${t.debit.toFixed(2)}</td>
+      <td style="font-family:'DM Mono',monospace;color:var(--green)">$${t.target.toFixed(2)}</td>
+      <td style="font-family:'DM Mono',monospace;color:var(--red)">$${t.stop.toFixed(2)}</td>
+      <td style="font-family:'DM Mono',monospace">${t.contracts}</td>
+      <td style="font-family:'DM Mono',monospace;color:var(--amber)">${t.ibd_rs||'—'}</td>
+      <td><select class="status-sel" onchange="updateStatus(${t.id},this.value)">
+        <option value="open" ${t.status==='open'?'selected':''}>Open</option>
+        <option value="won" ${t.status==='won'?'selected':''}>Won</option>
+        <option value="lost" ${t.status==='lost'?'selected':''}>Lost</option>
+        <option value="expired" ${t.status==='expired'?'selected':''}>Expired</option>
+      </select></td>
+      <td>${exitCell}</td><td>${pnlCell}</td>
+      <td><button class="del-btn" onclick="deleteTrade(${t.id})">×</button></td>
+    </tr>`;
+  });
+  html+='</tbody></table>';
+  document.getElementById('logContent').innerHTML=html;
+}
+function updateStatus(id,s){const t=tradeLog.find(t=>t.id===id);if(t){t.status=s;localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
+function updatePnl(id,ep,debit,contracts){const t=tradeLog.find(t=>t.id===id);if(t&&ep){const e=parseFloat(ep);t.exitPrice=e;t.pnl=(e-debit)*100*contracts;t.status=t.pnl>=0?'won':'lost';localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
+function deleteTrade(id){if(confirm('Delete?')){tradeLog=tradeLog.filter(t=>t.id!==id);localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
+function clearLog(){if(confirm('Clear all trades?')){tradeLog=[];localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
+
+// ── Daily Review ──────────────────────────────────────────────────
+async function runReview() {
+  const btn = document.getElementById('reviewBtn');
+  const out = document.getElementById('reviewOutput');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Fetching live prices…';
+
+  const open = tradeLog.filter(t => t.status === 'open');
+  if (!open.length) {
+    out.innerHTML = '<div class="review-empty">No open trades in your log.<br><span style="font-size:13px;color:var(--text3)">Add trades from the Scanner tab first.</span></div>';
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg> Refresh live prices';
+    return;
+  }
+
+  try {
+    const r = await fetch('/api/review', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(open.map(t => ({
+        ticker:     t.ticker,
+        structure:  t.structure,
+        expiration: t.expiration,
+        debit:      t.debit,
+        target:     t.target,
+        stop:       t.stop,
+        contracts:  t.contracts,
+        entryDate:  t.entryDate,
+      })))
+    });
+    const d = await r.json();
+    if (d.error) { out.innerHTML = `<div class="error-box">${d.error}</div>`; return; }
+    renderReview(d);
+  } catch(e) {
+    out.innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg> Refresh live prices';
+}
+
+function renderReview(data) {
+  const out = document.getElementById('reviewOutput');
+  if (!data.results || !data.results.length) {
+    out.innerHTML = '<div class="review-empty">No results.</div>';
+    return;
+  }
+
+  // Sort: critical first, then warn, then normal
+  const urgencyOrder = {critical:0, warn:1, normal:2};
+  const sorted = [...data.results].sort((a,b) => 
+    (urgencyOrder[a.urgency]||2) - (urgencyOrder[b.urgency]||2));
+
+  let html = `<div class="review-as-of">Live prices as of ${data.as_of}</div>`;
+
+  sorted.forEach(t => {
+    const u = t.urgency || 'normal';
+    const cv = t.current_value;
+    const pnl = t.pnl;
+    const pnlPct = t.pnl_pct;
+
+    // Progress bar: how far from stop to target
+    let progressPct = 0;
+    let progressColor = 'var(--green)';
+    if (cv !== null && t.debit > 0) {
+      const range = t.target - t.stop;
+      progressPct = Math.max(0, Math.min(100, ((cv - t.stop) / range) * 100));
+      if (progressPct < 30) progressColor = 'var(--red)';
+      else if (progressPct < 60) progressColor = 'var(--amber)';
+    }
+
+    html += `<div class="review-card ${u}">
+      <div class="review-header">
+        <div>
+          <div class="review-ticker">${t.ticker}</div>
+          <div class="review-structure">${t.structure}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:3px">Exp ${t.expiration} · ${t.dte !== null ? t.dte + ' DTE' : '—'} · ${t.contracts} contracts</div>
+        </div>
+        <div class="review-action">
+          <div class="action-badge ${u}">${t.action}</div>
+          ${pnl !== null ? `<div style="font-size:13px;font-family:'DM Mono',monospace;margin-top:6px;color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(0)} (${pnlPct>=0?'+':''}${pnlPct}%)</div>` : ''}
+        </div>
+      </div>
+
+      <div class="review-metrics">
+        <div class="review-metric">
+          <div class="rm-lbl">Entry</div>
+          <div class="rm-val">$${t.debit.toFixed(2)}</div>
+        </div>
+        <div class="review-metric">
+          <div class="rm-lbl">Current</div>
+          <div class="rm-val ${cv===null?'amber':cv>=t.target?'green':cv<=t.stop?'red':''}">${cv !== null ? '$'+cv.toFixed(2) : '—'}</div>
+        </div>
+        <div class="review-metric">
+          <div class="rm-lbl">Target</div>
+          <div class="rm-val green">$${t.target.toFixed(2)}</div>
+        </div>
+        <div class="review-metric">
+          <div class="rm-lbl">Stop</div>
+          <div class="rm-val red">$${t.stop.toFixed(2)}</div>
+        </div>
+        <div class="review-metric">
+          <div class="rm-lbl">DTE</div>
+          <div class="rm-val ${t.dte!==null&&t.dte<=21?'red':t.dte!==null&&t.dte<=25?'amber':'blue'}">${t.dte !== null ? t.dte : '—'}</div>
+        </div>
+      </div>
+
+      ${cv !== null ? `
+      <div style="height:6px;background:var(--bg3);border-radius:3px;margin-bottom:12px;overflow:hidden">
+        <div style="height:6px;width:${progressPct}%;background:${progressColor};border-radius:3px;transition:width .5s"></div>
+      </div>` : ''}
+
+      <div class="review-detail ${u}">${t.action_detail}</div>
+    </div>`;
+  });
+
+  out.innerHTML = html;
+}
+
+checkStatus();
+setInterval(checkStatus, 60000);
+</script>
+</body>
+</html>
