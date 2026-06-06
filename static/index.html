@@ -188,6 +188,9 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .pnl-pos{color:var(--green);font-family:'DM Mono',monospace;font-weight:500}
 .pnl-neg{color:var(--red);font-family:'DM Mono',monospace;font-weight:500}
 .del-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:2px 6px;border-radius:4px}.del-btn:hover{color:var(--red)}
+.edit-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:4px}.edit-btn:hover{color:var(--blue)}
+.add-manual-btn{padding:8px 14px;background:none;border:1px solid var(--border2);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif}
+.add-manual-btn:hover{border-color:var(--green);color:var(--green)}
 .exit-in{width:80px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:12px;font-family:'DM Mono',monospace}
 /* Modal */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;align-items:center;justify-content:center}
@@ -413,6 +416,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
           <option value="lost">Losers</option>
           <option value="expired">Expired</option>
         </select>
+        <button class="add-manual-btn" onclick="openEditModal(null)">+ Add trade manually</button>
         <button class="clear-btn" onclick="clearLog()">Clear all</button>
       </div>
       <div id="logContent"></div>
@@ -532,6 +536,17 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
     <div class="modal-actions">
       <button class="modal-cancel" onclick="closeModal()">Cancel</button>
       <button class="modal-save" onclick="saveToLog()">Save trade</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <h3 id="editModalTitle">Edit trade</h3>
+    <div id="editModalContent"></div>
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeEditModal()">Cancel</button>
+      <button class="modal-save" onclick="saveEditModal()">Save changes</button>
     </div>
   </div>
 </div>
@@ -1070,6 +1085,87 @@ function saveToLog() {
   if (b) { b.textContent='✓ Added'; b.classList.add('added'); b.disabled=true; }
 }
 
+// ── Edit / manual add modal ────────────────────────────────────────
+let _editingId = null;
+
+function openEditModal(id) {
+  _editingId = id;
+  const t = id !== null ? tradeLog.find(x => x.id === id) : null;
+  const isNew = t === null;
+  document.getElementById('editModalTitle').textContent = isNew ? 'Add trade manually' : 'Edit trade';
+  const today = new Date().toISOString().split('T')[0];
+
+  const v = (field, def) => t ? (t[field] !== undefined && t[field] !== null ? t[field] : def) : def;
+
+  document.getElementById('editModalContent').innerHTML = `
+    <div class="mf"><label>Ticker</label><input type="text" id="e_ticker" value="${v('ticker','')}" placeholder="e.g. AMD"></div>
+    <div class="mf"><label>Structure</label><input type="text" id="e_structure" value="${v('structure','')}" placeholder="Buy $525 call / Sell $535 call"></div>
+    <div class="mf"><label>Expiration</label><input type="text" id="e_expiration" value="${v('expiration','')}" placeholder="Jul 17 2026"></div>
+    <div class="mf"><label>Entry date</label><input type="date" id="e_date" value="${v('entryDate', today)}"></div>
+    <div class="mf"><label>Contracts</label><input type="number" id="e_contracts" value="${v('contracts',1)}" min="1"></div>
+    <div class="mf"><label>Debit paid</label><input type="number" id="e_debit" value="${v('debit',0)}" step="0.01"></div>
+    <div class="mf"><label>Profit target</label><input type="number" id="e_target" value="${v('target',0)}" step="0.01"></div>
+    <div class="mf"><label>Stop loss</label><input type="number" id="e_stop" value="${v('stop',0)}" step="0.01"></div>
+    <div class="mf"><label>IBD RS (optional)</label><input type="number" id="e_ibd_rs" value="${v('ibd_rs','')}" min="0" max="99"></div>
+    <div class="mf"><label>Notes</label><textarea id="e_notes" placeholder="Why you took this…">${v('notes','')}</textarea></div>`;
+  document.getElementById('editModal').classList.add('open');
+}
+
+function closeEditModal() {
+  document.getElementById('editModal').classList.remove('open');
+  _editingId = null;
+}
+
+function saveEditModal() {
+  const ticker = document.getElementById('e_ticker').value.trim().toUpperCase();
+  if (!ticker) { alert('Ticker is required'); return; }
+
+  const debit = parseFloat(document.getElementById('e_debit').value) || 0;
+  const contracts = parseInt(document.getElementById('e_contracts').value) || 1;
+  const ibdRs = document.getElementById('e_ibd_rs').value;
+
+  const data = {
+    ticker:     ticker,
+    structure:  document.getElementById('e_structure').value.trim(),
+    expiration: document.getElementById('e_expiration').value.trim(),
+    entryDate:  document.getElementById('e_date').value,
+    contracts:  contracts,
+    debit:      debit,
+    target:     parseFloat(document.getElementById('e_target').value) || 0,
+    stop:       parseFloat(document.getElementById('e_stop').value) || 0,
+    ibd_rs:     ibdRs ? parseInt(ibdRs) : null,
+    notes:      document.getElementById('e_notes').value,
+  };
+
+  if (_editingId !== null) {
+    // Editing existing trade — preserve status, exitPrice, and recompute pnl
+    const t = tradeLog.find(x => x.id === _editingId);
+    if (t) {
+      Object.assign(t, data);
+      // Recompute P&L if exit price is set
+      if (t.exitPrice !== null && t.exitPrice !== undefined) {
+        t.pnl = (t.exitPrice - t.debit) * 100 * t.contracts;
+        t.status = t.pnl >= 0 ? 'won' : 'lost';
+      }
+    }
+  } else {
+    // New manual trade
+    tradeLog.unshift({
+      id: Date.now(),
+      company: ticker,
+      ...data,
+      returnPct: data.debit > 0 ? Math.round((data.target - data.debit) / data.debit * 100) : 0,
+      status: 'open',
+      exitPrice: null,
+      pnl: null,
+      ibd_score: null,
+    });
+  }
+  localStorage.setItem('tradeLogv4', JSON.stringify(tradeLog));
+  closeEditModal();
+  renderLog();
+}
+
 // ── Log ────────────────────────────────────────────────────────────
 function renderLog() {
   const filter = document.getElementById('logFilter').value;
@@ -1105,7 +1201,10 @@ function renderLog() {
         <option value="expired" ${t.status==='expired'?'selected':''}>Expired</option>
       </select></td>
       <td>${exitCell}</td><td>${pnlCell}</td>
-      <td><button class="del-btn" onclick="deleteTrade(${t.id})">×</button></td>
+      <td style="white-space:nowrap">
+        <button class="edit-btn" onclick="openEditModal(${t.id})" title="Edit">✎</button>
+        <button class="del-btn" onclick="deleteTrade(${t.id})" title="Delete">×</button>
+      </td>
     </tr>`;
   });
   html+='</tbody></table>';
