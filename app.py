@@ -856,8 +856,21 @@ def get_best_spread(client, symbol, price, regime):
             if len(strikes) < 3:
                 continue
 
-            # ATM = closest strike to current price
-            atm = min(strikes, key=lambda x: abs(x - price))
+            # Long leg: slightly IN THE MONEY for higher win rate.
+            # For calls (bullish): one strike BELOW current price (~60-65 delta)
+            # For puts (bearish):  one strike ABOVE current price (~60-65 delta)
+            # Being ITM at entry means the stock doesn't have to move much to win,
+            # which raises the probability of profit and suits once-a-day monitoring.
+            if regime in ('bullish', 'caution'):
+                itm_candidates = [s for s in strikes if s < price]
+                itm_target = price * 0.975   # ~2.5% ITM, roughly 60-65 delta
+                atm = min(itm_candidates, key=lambda x: abs(x - itm_target)) if itm_candidates \
+                      else min(strikes, key=lambda x: abs(x - price))
+            else:
+                itm_candidates = [s for s in strikes if s > price]
+                itm_target = price * 1.025
+                atm = min(itm_candidates, key=lambda x: abs(x - itm_target)) if itm_candidates \
+                      else min(strikes, key=lambda x: abs(x - price))
 
             # Try each target width — deduplicate by actual (buy_s, sell_s) pair
             tried_pairs = set()
@@ -912,11 +925,10 @@ def get_best_spread(client, symbol, price, regime):
                 sl = round(nd * 0.50, 2)
                 rp = round((pt - nd) / nd * 100)
 
-                # Accept any return — we exit at 50% of max profit
-                # which always yields ~half the max return regardless of range
-                # Only filter extremes: <10% (spread too wide) or >300% (too cheap/risky)
-                if rp < 10 or rp > 300: continue  # return out of range
-                if nd < 0.50: continue                # debit too cheap
+                # Return band tuned for slightly-ITM, higher-win-rate spreads.
+                # Target 25-50% return on debit (25% floor = your minimum).
+                if rp < 25 or rp > 50: continue  # outside target band
+                if nd < 0.50: continue            # debit too cheap
 
                 buy_oi    = buy_o.get('openInterest', 0) or 0
                 sell_oi   = sell_o.get('openInterest', 0) or 0
@@ -1063,6 +1075,50 @@ def get_iron_condor(client, symbol, price):
     except Exception as e:
         print(f'Condor error {symbol}: {e}')
     return None
+
+def calc_position_size(debit, account_size, risk_pct, max_debit_budget=10000,
+                       risk_per_contract_override=None):
+    """
+    Recommend contract count based on risk per trade.
+    Risk per trade    = account_size * risk_pct%
+    Risk per contract = stop loss * 100. For a vertical debit spread the stop is
+                        50% of debit, so risk/contract = debit * 0.50 * 100.
+                        For other structures (e.g. iron condors) pass
+                        risk_per_contract_override with the true max risk.
+    Contracts = risk budget / risk per contract, minimum 1.
+    Capped so total capital deployed stays under max_debit_budget.
+    """
+    if debit <= 0 and not risk_per_contract_override:
+        return {'contracts':1,'dollar_risk':0,'pct_of_account':0,
+                'total_debit':0,'warning':None}
+
+    risk_budget       = account_size * (risk_pct / 100.0)
+    # Use explicit risk if given (condors), else 50%-of-debit stop (verticals)
+    risk_per_contract = risk_per_contract_override if risk_per_contract_override \
+                        else debit * 0.50 * 100
+    raw_contracts     = risk_budget / risk_per_contract if risk_per_contract > 0 else 1
+
+    contracts = max(1, int(raw_contracts))   # floor, minimum 1
+
+    # Cap by total capital budget (use debit for verticals; for condors debit is
+    # the credit collected so capital deployed is better measured by risk)
+    per_contract_capital = (debit * 100) if debit > 0 else risk_per_contract
+    max_by_budget = int(max_debit_budget / per_contract_capital) if per_contract_capital > 0 else contracts
+    if max_by_budget >= 1:
+        contracts = min(contracts, max_by_budget)
+    contracts = max(1, contracts)
+
+    dollar_risk    = round(risk_per_contract * contracts, 2)
+    pct_of_account = round(dollar_risk / account_size * 100, 2) if account_size > 0 else 0
+    total_debit    = round(per_contract_capital * contracts, 2)
+
+    warning = None
+    if pct_of_account > 3.0:
+        warning = (f'1 contract risks {pct_of_account:.1f}% of account (above 3% target)')
+
+    return {'contracts':contracts,'dollar_risk':dollar_risk,
+            'pct_of_account':pct_of_account,'total_debit':total_debit,
+            'warning':warning}
 
 # ── Build tags ────────────────────────────────────────────────────────────────
 def build_tags(stock, spread, regime, earn_date, is_ibd):
@@ -1229,6 +1285,11 @@ def api_scan():
     client=get_client()
     if not client: return jsonify({'error':'Schwab not configured. Check config.json.'}),400
     sector_filter=request.args.get('sector','all').lower()
+    # Position sizing inputs (from the Position Sizing panel)
+    try:    account_size = float(request.args.get('account', 10000))
+    except: account_size = 10000.0
+    try:    risk_pct = float(request.args.get('risk_pct', 1.5))
+    except: risk_pct = 1.5
     try:
         emit('Detecting market regime…')
         regime_data=detect_regime(client); regime=regime_data['regime']
@@ -1312,6 +1373,17 @@ def api_scan():
 
             ibd=ibd50_get(sym)
             tags=build_tags(stock,spread,regime,stock.get('earnings_date'),stock['is_ibd50'])
+            # Risk-based position size recommendation.
+            # Verticals: risk = 50% of debit (the stop). Condors: real max loss per contract.
+            if spread.get('is_condor'):
+                # Condor max loss per contract = wing width - credit, in dollars.
+                # capital_at_risk / contracts gives per-contract max loss.
+                cpc = spread.get('contracts_per_10k', 1) or 1
+                condor_risk_per_contract = (spread.get('capital_at_risk', 0) / cpc) if cpc else 0
+                psize = calc_position_size(spread['entry'], account_size, risk_pct,
+                                           risk_per_contract_override=condor_risk_per_contract)
+            else:
+                psize = calc_position_size(spread['entry'], account_size, risk_pct)
 
             trades.append({
                 'ticker':sym,
@@ -1331,6 +1403,11 @@ def api_scan():
                 'return_on_debit':spread['return_on_debit'],
                 'contracts_per_10k':spread['contracts_per_10k'],
                 'capital_at_risk':spread['capital_at_risk'],
+                'rec_contracts':psize['contracts'],
+                'rec_dollar_risk':psize['dollar_risk'],
+                'rec_pct_of_account':psize['pct_of_account'],
+                'rec_total_debit':psize['total_debit'],
+                'rec_warning':psize['warning'],
                 'open_interest':spread['buy_oi'],
                 'iv':spread.get('iv','—'),'delta':spread.get('delta','—'),
                 'theta':spread.get('theta','—'),

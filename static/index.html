@@ -67,6 +67,15 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .u-chip{background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:4px 10px;font-size:11px;color:var(--text2);font-family:'DM Mono',monospace}
 .u-chip span{color:var(--text);font-weight:500;margin-left:3px}
 /* Filters */
+.sizing-panel{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;margin-bottom:14px}
+.sizing-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:10px}
+.sizing-field label{display:block;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:6px}
+.sizing-input-wrap{display:flex;align-items:center;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:0 10px}
+.sizing-input-wrap:focus-within{border-color:var(--green)}
+.sizing-prefix,.sizing-suffix{color:var(--text2);font-family:'DM Mono',monospace;font-size:14px}
+.sizing-input-wrap input{flex:1;background:none;border:none;padding:9px 4px;color:var(--text);font-size:15px;font-family:'DM Mono',monospace;outline:none;width:100%}
+.sizing-computed{background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:9px 12px;color:var(--green);font-size:15px;font-family:'DM Mono',monospace}
+.sizing-note{font-size:11px;color:var(--text3);line-height:1.6}
 .filter-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px 18px;margin-bottom:14px}
 .filter-label{font-size:11px;color:var(--text2);margin-bottom:7px}
 .filter-row{display:grid;grid-template-columns:1fr 160px;gap:10px}
@@ -129,6 +138,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .level.target .lv-sub{color:var(--green)}.level.stop .lv-sub{color:var(--red)}
 .pos-row{display:flex;gap:20px;padding:10px 0;border-top:1px solid var(--border);margin-bottom:10px;flex-wrap:wrap}
 .pos-item{font-size:12px;color:var(--text2)}.pos-item span{color:var(--text);font-weight:500;margin-left:4px;font-family:'DM Mono',monospace}
+.rec-warning{font-size:12px;color:var(--amber);background:var(--ad);border:1px solid rgba(246,176,66,.3);border-radius:var(--rs);padding:8px 12px;margin-bottom:10px}
 .rationale{font-size:13px;color:var(--text2);line-height:1.65;padding-top:10px;border-top:1px solid var(--border)}
 .ibd-link{display:inline-flex;align-items:center;gap:5px;margin-top:8px;font-size:12px;color:var(--amber);text-decoration:none;border:1px solid rgba(246,176,66,.25);padding:4px 10px;border-radius:20px;background:var(--ad)}
 .ibd-link:hover{opacity:.8}
@@ -347,6 +357,25 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
       <div class="page-header">
         <div class="page-title">Options Scanner</div>
         <div class="page-desc">Live Schwab data + IBD50 multi-factor scoring. Regime-adaptive strategy selection. Earnings filtered automatically.</div>
+      </div>
+      <div class="sizing-panel">
+        <div class="sizing-row">
+          <div class="sizing-field">
+            <label>Account size</label>
+            <div class="sizing-input-wrap"><span class="sizing-prefix">$</span>
+              <input type="number" id="accountSize" value="10000" min="500" step="500" oninput="saveSizing()"></div>
+          </div>
+          <div class="sizing-field">
+            <label>Risk per trade</label>
+            <div class="sizing-input-wrap">
+              <input type="number" id="riskPct" value="1.5" min="0.25" max="5" step="0.25" oninput="saveSizing()"><span class="sizing-suffix">%</span></div>
+          </div>
+          <div class="sizing-field">
+            <label>Max risk / trade</label>
+            <div class="sizing-computed" id="maxRiskDisplay">$150</div>
+          </div>
+        </div>
+        <div class="sizing-note">Position size is recommended per trade so each risks ~<span id="riskPctEcho">1.5</span>% at your stop loss. Update your account size as it grows.</div>
       </div>
       <div id="mktBar" style="display:none"></div>
       <div id="universeBadge" style="display:none"></div>
@@ -869,10 +898,30 @@ function updateProgress(msg, detail, pct) {
   }
 }
 
+function saveSizing() {
+  const acct = parseFloat(document.getElementById('accountSize').value) || 10000;
+  const risk = parseFloat(document.getElementById('riskPct').value) || 1.5;
+  localStorage.setItem('scannerAccount', acct);
+  localStorage.setItem('scannerRiskPct', risk);
+  const maxRisk = acct * (risk / 100);
+  document.getElementById('maxRiskDisplay').textContent = '$' + Math.round(maxRisk).toLocaleString();
+  const echo = document.getElementById('riskPctEcho');
+  if (echo) echo.textContent = risk;
+}
+function loadSizing() {
+  const acct = localStorage.getItem('scannerAccount');
+  const risk = localStorage.getItem('scannerRiskPct');
+  if (acct) document.getElementById('accountSize').value = acct;
+  if (risk) document.getElementById('riskPct').value = risk;
+  saveSizing();
+}
+
 async function runScan() {
   const btn = document.getElementById('scanBtn');
   const out = document.getElementById('scanOutput');
   const sector = document.getElementById('sectorFilter').value;
+  const account = parseFloat(document.getElementById('accountSize').value) || 10000;
+  const riskPct = parseFloat(document.getElementById('riskPct').value) || 1.5;
   btn.disabled = true;
   _detailOpen = false;
 
@@ -918,7 +967,7 @@ async function runScan() {
   } catch(e) { /* SSE not supported — fallback to plain spinner */ }
 
   try {
-    const r = await fetch(`/api/scan?sector=${encodeURIComponent(sector)}`);
+    const r = await fetch(`/api/scan?sector=${encodeURIComponent(sector)}&account=${account}&risk_pct=${riskPct}`);
     const d = await r.json();
     if (sse) { sse.close(); sse = null; }
     if (d.error) { out.innerHTML = `<div class="error-box">${d.error}</div>`; btn.disabled=false; return; }
@@ -1043,13 +1092,20 @@ function renderTrades(data) {
       <div class="level stop"><div class="lv-label">Stop loss</div><div class="lv-val">$${t.stop_loss.toFixed(2)}</div><div class="lv-sub">no exceptions</div></div>
     </div>`;
 
+    const recC = t.rec_contracts || 1;
+    const recRisk = t.rec_dollar_risk || 0;
+    const recPct = t.rec_pct_of_account || 0;
+    const recDebit = t.rec_total_debit || 0;
     html += `<div class="pos-row">
-      <div class="pos-item">Contracts/$10k<span>${t.contracts_per_10k}</span></div>
-      <div class="pos-item">Capital at risk<span>$${t.capital_at_risk}</span></div>
+      <div class="pos-item">Recommended<span style="color:var(--green)">${recC} contract${recC>1?'s':''}</span></div>
+      <div class="pos-item">Risk at stop<span style="color:var(--red)">$${recRisk.toFixed(0)} (${recPct.toFixed(1)}%)</span></div>
+      <div class="pos-item">Total debit<span>$${recDebit.toFixed(0)}</span></div>
       <div class="pos-item">Open interest<span>${t.open_interest}</span></div>
       ${t.iv !== '—' ? `<div class="pos-item">IV<span>${t.iv}%</span></div>` : ''}
-      <div class="pos-item">Max loss<span style="color:var(--red)">$${(t.net_debit*100*t.contracts_per_10k).toFixed(0)}</span></div>
     </div>`;
+    if (t.rec_warning) {
+      html += `<div class="rec-warning">⚠ ${t.rec_warning}</div>`;
+    }
 
     html += `<div class="rationale">${t.rationale}
 <br><a class="ibd-link" href="${t.ibd_lookup}" target="_blank">↗ ${t.ibd_rs ? 'View on IBD (RS ' + t.ibd_rs + ')' : 'Verify RS on IBD'}</a></div>`;
@@ -1141,7 +1197,7 @@ function openModal(trade) {
     <div class="mf"><label>Structure</label><input type="text" value="${trade.buy_leg}" readonly></div>
     <div class="mf"><label>Expiration</label><input type="text" value="${trade.expiration}" readonly></div>
     <div class="mf"><label>Entry date</label><input type="date" id="m_date" value="${today}"></div>
-    <div class="mf"><label>Contracts</label><input type="number" id="m_contracts" value="${trade.contracts_per_10k}" min="1"></div>
+    <div class="mf"><label>Contracts</label><input type="number" id="m_contracts" value="${trade.rec_contracts||1}" min="1"></div>
     <div class="mf"><label>Actual debit paid</label><input type="number" id="m_debit" value="${trade.net_debit}" step="0.01"></div>
     <div class="mf"><label>Notes</label><textarea id="m_notes" placeholder="Why you took this…"></textarea></div>`;
   document.getElementById('logModal').classList.add('open');
@@ -1415,8 +1471,9 @@ function renderReview(data) {
   out.innerHTML = html;
 }
 
-// Apply saved theme on load
+// Apply saved theme and sizing on load
 applyTheme();
+loadSizing();
 
 // Check auth first, then status
 checkAuthStatus().then(connected => {

@@ -423,6 +423,90 @@ check('Condor P&L negative when up',
       round((2.00 - 3.50) * 100 * 10), -1500)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Position sizing — risk-based recommendation')
+ps = app.calc_position_size(debit=3.00, account_size=10000, risk_pct=1.5)
+# Risk budget = 150, risk/contract = 3.00*0.5*100 = 150, so 1 contract
+check('$10k 1.5% $3 debit → 1 contract', ps['contracts'], 1)
+check('Dollar risk = $150',              ps['dollar_risk'], 150.0)
+check('Pct of account = 1.5%',           ps['pct_of_account'], 1.5)
+check('No warning at 1.5%',              ps['warning'], None)
+
+# Cheaper spread → more contracts fit
+ps = app.calc_position_size(debit=1.00, account_size=10000, risk_pct=1.5)
+# risk/contract = 1.00*0.5*100 = 50, budget 150 → 3 contracts
+check('$10k 1.5% $1 debit → 3 contracts', ps['contracts'], 3)
+check('3 contracts risk = $150',          ps['dollar_risk'], 150.0)
+
+# Expensive spread → 1 contract but higher % risk → warning
+ps = app.calc_position_size(debit=7.00, account_size=10000, risk_pct=1.5)
+# risk/contract = 7*0.5*100 = 350 = 3.5% of 10k → 1 contract + warning
+check('$7 debit → 1 contract floor',     ps['contracts'], 1)
+check('$7 debit risk = $350',            ps['dollar_risk'], 350.0)
+check('$7 debit = 3.5% of account',      ps['pct_of_account'], 3.5)
+check('$7 debit triggers warning',       ps['warning'] is not None, True)
+
+# Larger account → more contracts
+ps = app.calc_position_size(debit=3.00, account_size=50000, risk_pct=1.5)
+# budget = 750, risk/contract 150 → 5 contracts
+check('$50k 1.5% $3 debit → 5 contracts', ps['contracts'], 5)
+check('5 contracts risk = $750',          ps['dollar_risk'], 750.0)
+
+# Debit budget cap — never exceed $10k total debit
+ps = app.calc_position_size(debit=2.00, account_size=500000, risk_pct=2.0)
+# budget huge, but $10k/(2*100)=50 contract cap
+check('Total debit capped under $10k', ps['total_debit'] <= 10000, True)
+
+# Account grows → recommendation scales
+ps_small = app.calc_position_size(debit=2.00, account_size=10000, risk_pct=1.5)
+ps_big   = app.calc_position_size(debit=2.00, account_size=30000, risk_pct=1.5)
+check('Bigger account → more contracts', ps_big['contracts'] > ps_small['contracts'], True)
+
+# Edge: zero debit doesn't crash
+ps = app.calc_position_size(debit=0, account_size=10000, risk_pct=1.5)
+check('Zero debit → 1 contract, no crash', ps['contracts'], 1)
+
+# Condor: explicit risk override sizes on real max loss, not 50% of credit
+ps = app.calc_position_size(debit=2.00, account_size=10000, risk_pct=1.5,
+                            risk_per_contract_override=300)
+check('Condor sized on real $300 risk', ps['dollar_risk'], 300)
+check('Condor risk = 3% of account',    ps['pct_of_account'], 3.0)
+# Without override it would wrongly size on $100 — confirm override changes it
+ps_wrong = app.calc_position_size(debit=2.00, account_size=10000, risk_pct=1.5)
+check('Override differs from naive debit sizing',
+      ps['dollar_risk'] != ps_wrong['dollar_risk'], True)
+
+section('Slightly-ITM strike selection logic')
+# For bullish: long leg target is ~2.5% below price (ITM)
+def itm_long_strike(price, strikes, bullish=True):
+    if bullish:
+        cands = [s for s in strikes if s < price]
+        target = price * 0.975
+        return min(cands, key=lambda x: abs(x-target)) if cands else min(strikes, key=lambda x: abs(x-price))
+    else:
+        cands = [s for s in strikes if s > price]
+        target = price * 1.025
+        return min(cands, key=lambda x: abs(x-target)) if cands else min(strikes, key=lambda x: abs(x-price))
+
+strikes = [510, 515, 520, 525, 530, 535, 540]
+# AMD at 523, bullish → target 510, closest ITM is 510 or 515
+buy = itm_long_strike(523, strikes, True)
+check('Bullish long leg is ITM (below price)', buy < 523, True)
+check('Bullish long leg near 2.5% ITM', buy in [510, 515], True)
+
+# Bearish at 336 → target above price
+strikes2 = [325, 330, 335, 340, 345, 350]
+buy2 = itm_long_strike(336, strikes2, False)
+check('Bearish long leg is ITM (above price)', buy2 > 336, True)
+
+section('Return band 25-50%')
+def in_band(rp): return 25 <= rp <= 50
+check('30% return in band',  in_band(30), True)
+check('25% return in band',  in_band(25), True)
+check('50% return in band',  in_band(50), True)
+check('20% return rejected', in_band(20), False)
+check('60% return rejected', in_band(60), False)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:
