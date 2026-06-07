@@ -76,6 +76,16 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .sizing-input-wrap input{flex:1;background:none;border:none;padding:9px 4px;color:var(--text);font-size:15px;font-family:'DM Mono',monospace;outline:none;width:100%}
 .sizing-computed{background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:9px 12px;color:var(--green);font-size:15px;font-family:'DM Mono',monospace}
 .sizing-note{font-size:11px;color:var(--text3);line-height:1.6}
+.checklist-strip{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);margin-bottom:14px;overflow:hidden}
+.checklist-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;background:none;border:none;padding:12px 18px;color:var(--text2);font-size:13px;font-family:'DM Sans',sans-serif;cursor:pointer;font-weight:500}
+.checklist-toggle:hover{color:var(--text)}
+#checklistChevron{transition:transform .2s;font-size:11px}
+.checklist-body{display:none;padding:0 18px 16px}
+.checklist-body.open{display:block}
+.checklist-ol{margin:0 0 10px;padding-left:20px;font-size:12.5px;color:var(--text2);line-height:1.9}
+.checklist-ol li{margin-bottom:2px}
+.checklist-link{font-size:12px;color:var(--blue);cursor:pointer;font-family:'DM Mono',monospace}
+.checklist-link:hover{text-decoration:underline}
 .filter-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px 18px;margin-bottom:14px}
 .filter-label{font-size:11px;color:var(--text2);margin-bottom:7px}
 .filter-row{display:grid;grid-template-columns:1fr 160px;gap:10px}
@@ -335,6 +345,9 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>Trade Log
       </button>
       <div class="nav-divider"></div>
+      <button class="nav-item" onclick="showPage('playbook',this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>Daily Playbook
+      </button>
       <button class="nav-item" onclick="showPage('instructions',this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>Setup Guide
       </button>
@@ -376,6 +389,26 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
           </div>
         </div>
         <div class="sizing-note">Position size is recommended per trade so each risks ~<span id="riskPctEcho">1.5</span>% at your stop loss. Update your account size as it grows.</div>
+      </div>
+      <div class="checklist-strip">
+        <button class="checklist-toggle" id="checklistToggle" onclick="toggleChecklist()">
+          <span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>Daily checklist</span>
+          <span id="checklistChevron">▸</span>
+        </button>
+        <div class="checklist-body" id="checklistBody">
+          <ol class="checklist-ol">
+            <li>Confirm <strong>account size</strong> above is your real balance</li>
+            <li>Scan between <strong>10am–3pm ET</strong> (avoid open/close)</li>
+            <li>Enter within ~30 min as a <strong>Limit order</strong> at the card's debit — verify price still matches</li>
+            <li>Use the <strong>recommended contract count</strong> — don't oversize</li>
+            <li>Immediately set <strong>ONE</strong> GTC closing order at your <strong>profit target</strong> (Sell vertical to close)</li>
+            <li><strong>Do not</strong> pre-place a stop order — manage the stop manually via Daily Review</li>
+            <li>Check <strong>Daily Review</strong> AM + midday; close at target, stop, or 21 DTE</li>
+            <li>When stop hits: <strong>cancel the profit-target order first</strong>, then close</li>
+            <li>After closing: update account size to new balance</li>
+          </ol>
+          <div class="checklist-link" onclick="showPage('playbook', document.querySelector('.nav-item[onclick*=playbook]'))">Full details in Daily Playbook →</div>
+        </div>
       </div>
       <div id="mktBar" style="display:none"></div>
       <div id="universeBadge" style="display:none"></div>
@@ -465,11 +498,11 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
       <div id="logContent"></div>
     </div>
 
-    <!-- INSTRUCTIONS -->
+    <!-- INSTRUCTIONS (one-time setup) -->
     <div id="page-instructions" class="page">
       <div class="page-header">
         <div class="page-title">Setup Guide</div>
-        <div class="page-desc">Complete setup, IBD50 import, and daily workflow.</div>
+        <div class="page-desc">One-time setup and weekly IBD50 import. For trading steps, see the Daily Playbook.</div>
       </div>
       <div class="instructions">
         <div class="instr-section">
@@ -513,6 +546,16 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
             </ul>
           </div></div>
         </div>
+      </div>
+    </div>
+
+    <!-- DAILY PLAYBOOK (trading workflow) -->
+    <div id="page-playbook" class="page">
+      <div class="page-header">
+        <div class="page-title">Daily Playbook</div>
+        <div class="page-desc">Entering trades, setting exit orders, and the daily routine. Step numbers continue from the Setup Guide.</div>
+      </div>
+      <div class="instructions">
         <div class="instr-section">
           <div class="instr-title">Entering trades in thinkorswim</div>
           <div class="step"><div class="step-num">6</div><div class="step-body">
@@ -568,12 +611,67 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
           </div></div>
         </div>
         <div class="instr-section">
-          <div class="instr-title">Daily workflow</div>
+          <div class="instr-title">Strategy &amp; position sizing</div>
           <div class="step"><div class="step-num">10</div><div class="step-body">
-            <h3>Run the scanner 10am–3:30pm ET</h3>
-            <p>Options liquidity peaks mid-session. Use the sector filter to focus on specific sectors. The market hours bar shows live status from Schwab.</p>
+            <h3>How the scanner picks spreads — built for win rate</h3>
+            <p>The scanner buys <strong>slightly in-the-money</strong> spreads (long leg about 2-3% in the money, roughly 60-65 delta) rather than at-the-money. Being in the money at entry means the stock barely has to move for the trade to work — this raises your win rate and means a slightly-ITM spread doesn't whipsaw on every intraday move, so once-a-day checking is enough.</p>
+            <ul>
+              <li>Return target is <strong>25-50% on debit</strong> — clears your 25% minimum while keeping spreads in high-probability territory</li>
+              <li>Max loss is always the debit you pay — defined and capped, no matter what the stock does</li>
+              <li>Higher win rate, smaller swings, lower stress than chasing 100%+ at-the-money spreads</li>
+            </ul>
           </div></div>
           <div class="step"><div class="step-num">11</div><div class="step-body">
+            <h3>Set your account size and risk — the Position Sizing panel</h3>
+            <p>At the top of the Scanner page, set two numbers:</p>
+            <ul>
+              <li><strong>Account size</strong> — your real balance. Start at $10,000 and update it as your account grows. This is the one number linking the tool to your actual account, so keep it current.</li>
+              <li><strong>Risk per trade</strong> — 1.5% is the recommended default. On a $10k account that's $150 of risk per trade.</li>
+            </ul>
+            <p>Every trade card then shows a <strong>recommended contract count</strong> sized so each trade risks about that same dollar amount at your stop loss. At $10k you'll usually see 1-2 contracts — that's correct and deliberately conservative. An amber warning appears only if a single contract would risk more than 3% of your account.</p>
+            <div class="warn-box">Position sizing is the single most important thing protecting your account. The recommended size keeps any one loss small and consistent — the opposite of putting 18 contracts on one trade.</div>
+          </div></div>
+        </div>
+        <div class="instr-section">
+          <div class="instr-title">Daily workflow</div>
+          <div class="step"><div class="step-num">12</div><div class="step-body">
+            <h3>Run the scanner 10am–3:30pm ET</h3>
+            <p>Check that your account size is current in the Position Sizing panel, then scan. Options liquidity peaks mid-session. Use the recommended contract count on each card — don't oversize. If the regime shows <strong>neutral</strong> (the scanner builds iron condors), consider sitting out and waiting for a bullish regime with clean bull call setups.</p>
+          </div></div>
+          <div class="step"><div class="step-num">13</div><div class="step-body">
+            <h3>When to execute — timing matters</h3>
+            <p>Enter trades in the same sitting as the scan, but avoid the first and last 30 minutes of the day:</p>
+            <ul>
+              <li><strong>Best window: 10:00 AM – 3:00 PM ET.</strong> The open (9:30–10:00) and close (3:30–4:00) have the widest bid/ask spreads and worst fills.</li>
+              <li><strong>Execute within ~15-30 minutes of scanning.</strong> The card prices off the live chain at scan time. Wait too long and the stock moves, so the debit you saw may no longer be available.</li>
+              <li><strong>Verify the price before sending.</strong> In thinkorswim, check the net debit matches the card within about $0.10-0.15. If it drifted more, adjust your limit to the current mid or re-scan.</li>
+              <li><strong>Always use a Limit order, never Market.</strong> Set the limit at the card's debit. If it doesn't fill in a few minutes, nudge up $0.05 at a time.</li>
+              <li><strong>You don't have to take every setup.</strong> 2-3 good positions at a time is plenty at a $10k account.</li>
+            </ul>
+          </div></div>
+          <div class="step"><div class="step-num">14</div><div class="step-body">
+            <h3>Set your profit target order — immediately after the fill</h3>
+            <p>As soon as your spread fills, set ONE closing order at your profit target. Don't wait — set it the same minute you're filled, so the trade can close itself while you're not watching.</p>
+            <ul>
+              <li>Right-click the position → <strong>Create Closing Order → Sell the vertical to close</strong></li>
+              <li>Set the price to the <strong>Profit target</strong> shown on the trade card (50% of max profit)</li>
+              <li>Order type <strong>Limit</strong>, duration <strong>GTC</strong> (Good Till Cancelled)</li>
+              <li>Set the quantity to your full contract count</li>
+              <li>For an iron condor instead: <strong>Buy the iron condor to close</strong> at 50% of the credit collected</li>
+            </ul>
+            <div class="warn-box">Set only ONE order — the profit target. Do NOT also place a separate stop-loss order at the same time. Two simultaneous closing orders on one position can leave you with a naked short if one fills and you forget to cancel the other.</div>
+          </div></div>
+          <div class="step"><div class="step-num">15</div><div class="step-body">
+            <h3>Handle the stop loss manually — don't pre-place it</h3>
+            <p>thinkorswim doesn't support reliable stop orders on spreads, and placing a second closing order alongside your profit target is risky. Instead, manage the stop by checking the Daily Review:</p>
+            <ul>
+              <li>The <strong>Daily Review</strong> tab flags <strong style="color:#f06060">CLOSE — STOP HIT</strong> when the spread drops to your stop (50% of debit)</li>
+              <li>When you see that flag: first <strong>cancel your working profit-target order</strong>, then create a new closing order at market or a limit near the current bid</li>
+              <li>Cancelling the profit target FIRST is what prevents the naked-short situation</li>
+              <li>Optional: set a price alert in TOS on the underlying stock near your stop level as a reminder to check</li>
+            </ul>
+          </div></div>
+          <div class="step"><div class="step-num">16</div><div class="step-body">
             <h3>Morning and midday — check Daily Review</h3>
             <p>Open the <strong>Daily Review</strong> tab and click Refresh. It fetches live spread prices from Schwab for all your open positions and tells you exactly what to do with each one. Actions include:</p>
             <ul>
@@ -584,7 +682,11 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
               <li><strong style="color:#2dd4a0">HOLD</strong> — between levels, nothing to do</li>
             </ul>
           </div></div>
-          <div class="step"><div class="step-num">12</div><div class="step-body">
+          <div class="step"><div class="step-num">17</div><div class="step-body">
+            <h3>After closing a trade — update your account size</h3>
+            <p>When you close a position, update the <strong>Account size</strong> field to your new real balance from Schwab. This keeps the contract recommendations accurate as your account grows or shrinks. The app can't see your brokerage balance, so this manual step is what keeps sizing honest.</p>
+          </div></div>
+          <div class="step"><div class="step-num">18</div><div class="step-body">
             <h3>Exit rules — follow every time</h3>
             <ul>
               <li>Close at profit target (50% of max profit) — the Daily Review will flag this</li>
@@ -626,6 +728,16 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 <script>
 let tradeLog = JSON.parse(localStorage.getItem('tradeLogv4') || '[]');
 let pendingTrade = null;
+
+// ── Daily checklist strip ──────────────────────────────────────────
+let _checklistOpen = false;
+function toggleChecklist() {
+  _checklistOpen = !_checklistOpen;
+  const body = document.getElementById('checklistBody');
+  const chev = document.getElementById('checklistChevron');
+  if (body) body.classList.toggle('open', _checklistOpen);
+  if (chev) chev.style.transform = _checklistOpen ? 'rotate(90deg)' : 'rotate(0deg)';
+}
 
 // ── Theme toggle ───────────────────────────────────────────────────
 let _theme = localStorage.getItem('scannerTheme') || 'dark';
