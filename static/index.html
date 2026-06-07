@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#0e0f11;--bg2:#15171a;--bg3:#1c1f23;--bg4:#242830;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.12);--text:#f0ede8;--text2:#8a8a8a;--text3:#444;--green:#2dd4a0;--gd:rgba(45,212,160,.12);--red:#f06060;--rd:rgba(240,96,96,.12);--blue:#60a5fa;--bd:rgba(96,165,250,.12);--amber:#f6b042;--ad:rgba(246,176,66,.12);--purple:#a78bfa;--pd:rgba(167,139,250,.12);--r:10px;--rs:6px}
+:root[data-theme="light"]{--bg:#f7f6f3;--bg2:#ffffff;--bg3:#f0eeea;--bg4:#e6e3dd;--border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.15);--text:#1a1c1e;--text2:#6b6b6b;--text3:#a8a8a8;--green:#0a9d72;--gd:rgba(10,157,114,.10);--red:#d23b3b;--rd:rgba(210,59,59,.09);--blue:#2563eb;--bd:rgba(37,99,235,.09);--amber:#c77d0a;--ad:rgba(199,125,10,.10);--purple:#7c3aed;--pd:rgba(124,58,237,.09)}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;min-height:100vh}
 .shell{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
@@ -21,6 +22,8 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .nav-item svg{width:15px;height:15px;flex-shrink:0}
 .nav-divider{height:1px;background:var(--border);margin:10px 12px}
 .sb-section{padding:12px;margin:0 10px 10px;background:var(--bg3);border-radius:var(--rs);border:1px solid var(--border)}
+.theme-toggle{display:flex;align-items:center;justify-content:center;gap:8px;width:calc(100% - 20px);margin:0 10px 10px;padding:9px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s}
+.theme-toggle:hover{color:var(--text);border-color:var(--border2)}
 .sb-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-family:'DM Mono',monospace;margin-bottom:6px}
 .sb-status{font-size:12px;line-height:1.7}
 .main{padding:32px 36px;overflow-y:auto}
@@ -102,6 +105,13 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .structure-box{background:var(--bg3);border-radius:var(--rs);padding:10px 14px;margin-bottom:12px;border:1px solid var(--border)}
 .struct-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:5px}
 .struct-main{font-size:14px;font-weight:500}.struct-legs{font-size:12px;color:var(--text2);margin-top:3px;font-family:'DM Mono',monospace;line-height:1.6}
+.condor-legs{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+.condor-leg{display:grid;grid-template-columns:54px 90px 1fr;gap:10px;align-items:center;padding:6px 10px;background:var(--bg2);border-radius:var(--rs);border:1px solid var(--border)}
+.leg-action{font-size:11px;font-weight:600;font-family:'DM Mono',monospace;text-align:center;padding:2px 0;border-radius:4px}
+.leg-action.buy{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.3)}
+.leg-action.sell{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.3)}
+.leg-strike{font-size:13px;font-weight:500;font-family:'DM Mono',monospace}
+.leg-role{font-size:11px;color:var(--text2)}
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
 .metric{background:var(--bg3);border-radius:var(--rs);padding:8px 10px}
 .m-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-family:'DM Mono',monospace;margin-bottom:4px}
@@ -320,6 +330,10 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
       </button>
     </nav>
     <div style="padding:0 10px 10px;margin-top:auto">
+      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">
+        <svg id="themeIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/></svg>
+        <span id="themeLabel">Light mode</span>
+      </button>
       <div class="sb-section">
         <div class="sb-label">Status</div>
         <div class="sb-status" id="credStatus">Checking…</div>
@@ -496,23 +510,52 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
           </div></div>
         </div>
         <div class="instr-section">
-          <div class="instr-title">Daily workflow</div>
+          <div class="instr-title">Entering iron condors in thinkorswim</div>
           <div class="step"><div class="step-num">8</div><div class="step-body">
+            <h3>When the market is neutral — four-leg condor</h3>
+            <p>In a neutral regime the scanner builds iron condors instead of verticals. A condor has four legs: two you SELL (collect premium) and two you BUY (protection). The trade card shows each leg clearly labeled.</p>
+            <ul>
+              <li>Trade tab → type the ticker → open the Options Chain</li>
+              <li>Find the expiration shown on the card</li>
+              <li><strong>Sell the inner call</strong> — click the <strong>Bid</strong> on the short call strike (closer to price)</li>
+              <li><strong>Buy the outer call</strong> — Ctrl+click the <strong>Ask</strong> on the long call strike (further out)</li>
+              <li><strong>Sell the inner put</strong> — Ctrl+click the <strong>Bid</strong> on the short put strike</li>
+              <li><strong>Buy the outer put</strong> — Ctrl+click the <strong>Ask</strong> on the long put strike</li>
+              <li>TOS recognizes all four legs as an <strong>IRON CONDOR</strong> order</li>
+              <li>The order shows a <strong>net credit</strong> (money you receive) — set as Limit at the credit shown on the card</li>
+            </ul>
+            <div class="warn-box">A condor order should show a CREDIT (positive number you collect), not a debit. The two SELL strikes are the inner ones closer to the current price; the two BUY strikes are your outer protection.</div>
+          </div></div>
+          <div class="step"><div class="step-num">9</div><div class="step-body">
+            <h3>Close the condor — opposite direction</h3>
+            <p>Closing a condor is the reverse of a vertical. You collected a credit at entry, so you close by paying to <strong>buy it back</strong> — ideally cheaper than you sold it.</p>
+            <ul>
+              <li>Right-click the condor position in Monitor → Activity and Positions</li>
+              <li>Select <strong>Create Closing Order → Buy the iron condor to close</strong></li>
+              <li>Set price to your profit target (50% of the credit collected — e.g. collected $2.00, target buy-back at $1.00)</li>
+              <li>Set order type to <strong>Limit GTC</strong></li>
+            </ul>
+            <div class="warn-box">Condor profit = collect high, buy back low. The Daily Review tab tells you exactly when to close and shows "BUY the iron condor to close" so you never get the direction wrong.</div>
+          </div></div>
+        </div>
+        <div class="instr-section">
+          <div class="instr-title">Daily workflow</div>
+          <div class="step"><div class="step-num">10</div><div class="step-body">
             <h3>Run the scanner 10am–3:30pm ET</h3>
             <p>Options liquidity peaks mid-session. Use the sector filter to focus on specific sectors. The market hours bar shows live status from Schwab.</p>
           </div></div>
-          <div class="step"><div class="step-num">9</div><div class="step-body">
+          <div class="step"><div class="step-num">11</div><div class="step-body">
             <h3>Morning and midday — check Daily Review</h3>
             <p>Open the <strong>Daily Review</strong> tab and click Refresh. It fetches live spread prices from Schwab for all your open positions and tells you exactly what to do with each one. Actions include:</p>
             <ul>
-              <li><strong style="color:#f06060">CLOSE — TARGET HIT</strong> — sell vertical immediately</li>
+              <li><strong style="color:#f06060">CLOSE — TARGET HIT</strong> — sell vertical (or buy condor) to close</li>
               <li><strong style="color:#f06060">CLOSE — STOP HIT</strong> — cancel profit target, close at market</li>
               <li><strong style="color:#f06060">CLOSE — 21 DTE RULE</strong> — time decay rule, close regardless of P&L</li>
               <li><strong style="color:#f6b042">WATCH — APPROACHING STOP</strong> — monitor closely</li>
               <li><strong style="color:#2dd4a0">HOLD</strong> — between levels, nothing to do</li>
             </ul>
           </div></div>
-          <div class="step"><div class="step-num">10</div><div class="step-body">
+          <div class="step"><div class="step-num">12</div><div class="step-body">
             <h3>Exit rules — follow every time</h3>
             <ul>
               <li>Close at profit target (50% of max profit) — the Daily Review will flag this</li>
@@ -554,6 +597,30 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 <script>
 let tradeLog = JSON.parse(localStorage.getItem('tradeLogv4') || '[]');
 let pendingTrade = null;
+
+// ── Theme toggle ───────────────────────────────────────────────────
+let _theme = localStorage.getItem('scannerTheme') || 'dark';
+function toggleTheme() {
+  _theme = (_theme === 'dark') ? 'light' : 'dark';
+  localStorage.setItem('scannerTheme', _theme);
+  applyTheme();
+}
+function applyTheme() {
+  const root = document.documentElement;
+  const label = document.getElementById('themeLabel');
+  const icon = document.getElementById('themeIcon');
+  if (_theme === 'light') {
+    root.setAttribute('data-theme', 'light');
+    if (label) label.textContent = 'Dark mode';
+    // Moon icon for switching back to dark
+    if (icon) icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+  } else {
+    root.removeAttribute('data-theme');
+    if (label) label.textContent = 'Light mode';
+    // Sun icon for switching to light
+    if (icon) icon.innerHTML = '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/>';
+  }
+}
 
 // ── Auth flow ──────────────────────────────────────────────────────
 let _authPolling = false;
@@ -945,8 +1012,23 @@ function renderTrades(data) {
     }
 
     html += `<div class="structure-box"><div class="struct-label">Trade · ${t.dte} DTE · Exp ${t.expiration}</div>
-      <div class="struct-main">${(t.strategy_type||'').replace(/_/g,' ')}</div>
-      <div class="struct-legs">${t.buy_leg}<br>${t.sell_leg}</div></div>`;
+      <div class="struct-main">${(t.strategy_type||'').replace(/_/g,' ')}</div>`;
+    if (t.is_condor && t.condor_legs) {
+      // Render iron condor as a clear 4-leg table
+      html += `<div class="condor-legs">`;
+      t.condor_legs.forEach(leg => {
+        const isBuy = leg.action === 'BUY';
+        html += `<div class="condor-leg">
+          <span class="leg-action ${isBuy?'buy':'sell'}">${leg.action}</span>
+          <span class="leg-strike">$${leg.strike.toFixed(0)} ${leg.type}</span>
+          <span class="leg-role">${leg.role}</span>
+        </div>`;
+      });
+      html += `</div>`;
+    } else {
+      html += `<div class="struct-legs">${t.buy_leg}<br>${t.sell_leg}</div>`;
+    }
+    html += `</div>`;
 
     html += `<div class="metrics">
       <div class="metric"><div class="m-lbl">Net debit</div><div class="m-val">$${t.net_debit.toFixed(2)}</div></div>
@@ -1289,7 +1371,7 @@ function renderReview(data) {
       <div class="review-header">
         <div>
           <div class="review-ticker">${t.ticker}</div>
-          <div class="review-structure">${t.structure}</div>
+          <div class="review-structure">${t.is_condor ? '🦅 ' : ''}${t.structure}</div>
           <div style="font-size:11px;color:var(--text2);margin-top:3px">Exp ${t.expiration} · ${t.dte !== null ? t.dte + ' DTE' : '—'} · ${t.contracts} contracts</div>
         </div>
         <div class="review-action">
@@ -1332,6 +1414,9 @@ function renderReview(data) {
 
   out.innerHTML = html;
 }
+
+// Apply saved theme on load
+applyTheme();
 
 // Check auth first, then status
 checkAuthStatus().then(connected => {

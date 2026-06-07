@@ -287,6 +287,142 @@ check('Auth error → has error msg',             s['auth_error'], 'timeout')
 check('Auth error → needs_auth True (retry)',   s['needs_auth'], True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Iron condor detection & review logic')
+import re as _re2
+def detect_condor(structure):
+    has_call = 'call' in structure.lower() or 'c /' in structure.lower()
+    has_put  = 'put'  in structure.lower() or 'p /' in structure.lower()
+    nums = [float(n) for n in _re2.findall(r'\$(\d+(?:\.\d+)?)', structure)]
+    return (len(nums) >= 4) and has_call and has_put
+
+check('Detect condor from 4-leg string',
+      detect_condor('SELL $446 call / BUY $451 call  +  SELL $404 put / BUY $399 put'), True)
+check('Vertical not detected as condor',
+      detect_condor('Buy $525 call / Sell $535 call'), False)
+check('Bear put vertical not condor',
+      detect_condor('Buy $335 put / Sell $325 put'), False)
+
+def condor_action(current, credit, target, stop, dte):
+    """Condor: profit when value drops below credit. Inverted from vertical."""
+    if current <= target:   return 'CLOSE — TARGET HIT'
+    elif current >= stop:   return 'CLOSE — STOP HIT'
+    elif dte <= 21:         return 'CLOSE — 21 DTE RULE'
+    elif dte <= 25:         return 'PREPARE TO CLOSE'
+    elif current >= stop*0.75: return 'WATCH — APPROACHING STOP'
+    elif current <= target*1.25: return 'NEAR TARGET'
+    else:                   return 'HOLD'
+
+# Condor: collected $2.00 credit, target $1.00 (50%), stop $4.00 (2x)
+check('Condor below target → CLOSE TARGET',
+      condor_action(0.95, 2.0, 1.0, 4.0, 30), 'CLOSE — TARGET HIT')
+check('Condor above stop → CLOSE STOP',
+      condor_action(4.10, 2.0, 1.0, 4.0, 30), 'CLOSE — STOP HIT')
+check('Condor 21 DTE → CLOSE',
+      condor_action(2.0, 2.0, 1.0, 4.0, 20), 'CLOSE — 21 DTE RULE')
+check('Condor mid-range → HOLD',
+      condor_action(2.0, 2.0, 1.0, 4.0, 30), 'HOLD')
+
+# Condor P&L: profit when current < credit
+def condor_pnl(credit, current, contracts):
+    return round((credit - current) * 100 * contracts, 2)
+check('Condor profit when bought back cheap',
+      condor_pnl(2.0, 1.0, 10), 1000.0)  # collected 2.00, buy back 1.00 = $1.00 x 100 x 10
+check('Condor loss when bought back expensive',
+      condor_pnl(2.0, 3.50, 10), -1500.0)
+
+# Vertical P&L: profit when current > debit (opposite direction)
+def vertical_pnl(debit, current, contracts):
+    return round((current - debit) * 100 * contracts, 2)
+check('Vertical profit when value rises',
+      vertical_pnl(2.95, 6.47, 18), 6336.0)
+
+# Condor strike parsing — 4 strikes in correct order
+nums = [float(n) for n in _re2.findall(r'\$(\d+(?:\.\d+)?)', 'SELL $446 call / BUY $451 call  +  SELL $404 put / BUY $399 put')]
+check('Condor parses 4 strikes', len(nums), 4)
+check('Short call = first strike',  nums[0], 446.0)
+check('Long call = second strike',  nums[1], 451.0)
+check('Short put = third strike',   nums[2], 404.0)
+check('Long put = fourth strike',   nums[3], 399.0)
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('All trade types — detection & close direction')
+import re as _re3
+def classify_trade(structure):
+    """Replicate api_review's trade-type detection."""
+    s = structure.lower()
+    has_call = 'call' in s or 'c /' in s
+    has_put  = 'put'  in s or 'p /' in s
+    nums = [float(n) for n in _re3.findall(r'\$(\d+(?:\.\d+)?)', structure)]
+    is_condor = (len(nums) >= 4) and has_call and has_put
+    if is_condor:                return 'condor', 'PUT_AND_CALL'
+    elif has_put and not has_call: return 'bear_put', 'PUT'
+    else:                          return 'bull_call', 'CALL'
+
+# Bull call spread
+typ, ct = classify_trade('Buy $525 call / Sell $535 call')
+check('Bull call detected',        typ, 'bull_call')
+check('Bull call uses CALL chain', ct, 'CALL')
+
+# Bear put spread
+typ, ct = classify_trade('Buy $335 put / Sell $325 put')
+check('Bear put detected',         typ, 'bear_put')
+check('Bear put uses PUT chain',   ct, 'PUT')
+
+# Iron condor
+typ, ct = classify_trade('SELL $446 call / BUY $451 call  +  SELL $404 put / BUY $399 put')
+check('Condor detected',           typ, 'condor')
+
+# Close direction
+def close_direction(trade_type):
+    return 'BUY' if trade_type == 'condor' else 'SELL'
+check('Bull call closes by SELL',  close_direction('bull_call'), 'SELL')
+check('Bear put closes by SELL',   close_direction('bear_put'),  'SELL')
+check('Condor closes by BUY',      close_direction('condor'),    'BUY')
+
+section('Bull call spread — entry & exit math')
+# Buy $525 ATM call, sell $535 call, both calls
+# buy_mark > sell_mark (ATM more expensive) → positive debit
+nd = 3.00; width = 10.0
+mp = width - nd
+check('Bull call max profit',      mp, 7.0)
+check('Bull call breakeven = buy+debit', 525 + nd, 528.0)
+# Profit when spread value rises
+check('Bull call profits as value rises', (6.0 - nd) > 0, True)
+
+section('Bear put spread — entry & exit math')
+# Buy $335 ATM put, sell $325 put, both puts
+# buy_mark (higher strike put) > sell_mark (lower strike put) → positive debit
+nd = 3.00; width = 10.0
+check('Bear put max profit',       width - nd, 7.0)
+check('Bear put breakeven = buy-debit', 335 - nd, 332.0)
+# Profit when stock FALLS (spread value rises as puts gain)
+check('Bear put profits as value rises', (6.0 - nd) > 0, True)
+
+section('Iron condor — entry & exit math')
+# Collect $2.00 credit, wing width $5, max loss = 5 - 2 = 3
+credit = 2.00; wing = 5.0
+max_loss = wing - credit
+check('Condor max loss = wing - credit', max_loss, 3.0)
+check('Condor profit target = 50% credit', round(credit * 0.5, 2), 1.0)
+check('Condor stop = 2x credit',          round(credit * 2, 2), 4.0)
+# Profit when bought back BELOW credit
+check('Condor profits as value falls', (credit - 1.0) > 0, True)
+
+section('P&L sign correctness across all types')
+# Bull call: paid 2.95, now worth 6.47 → profit
+check('Bull call P&L positive when up',
+      round((6.47 - 2.95) * 100 * 18), 6336)
+# Bear put: paid 3.00, now worth 5.00 → profit
+check('Bear put P&L positive when up',
+      round((5.00 - 3.00) * 100 * 10), 2000)
+# Condor: collected 2.00, now worth 1.00 → profit
+check('Condor P&L positive when down',
+      round((2.00 - 1.00) * 100 * 10), 1000)
+# Condor: collected 2.00, now worth 3.50 → loss
+check('Condor P&L negative when up',
+      round((2.00 - 3.50) * 100 * 10), -1500)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:

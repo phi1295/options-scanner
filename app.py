@@ -1039,9 +1039,23 @@ def get_iron_condor(client, symbol, price):
             pt=round(nc*0.50,2); sl=round(nc*2,2)
             rp=round(pt/ml*100) if ml>0 else 0
             contracts=max(1,math.floor(10000/(ml*100*2)))
+            # Iron condor has 4 legs. Clearly label each as BUY or SELL.
+            #   sc = short call  (SELL) — collect premium
+            #   lc = long call   (BUY)  — protection above
+            #   sp = short put   (SELL) — collect premium
+            #   lp = long put    (BUY)  — protection below
+            condor_legs = [
+                {'action':'SELL','type':'call','strike':sc,'role':'Short call (collect premium)'},
+                {'action':'BUY', 'type':'call','strike':lc,'role':'Long call (upside protection)'},
+                {'action':'SELL','type':'put', 'strike':sp,'role':'Short put (collect premium)'},
+                {'action':'BUY', 'type':'put', 'strike':lp,'role':'Long put (downside protection)'},
+            ]
             return {'expiration':exp_date.strftime('%b %d %Y'),'dte':dte,
-                    'buy_leg':f'Sell ${sc:.0f}C/${lc:.0f}C  +  Sell ${sp:.0f}P/${lp:.0f}P',
-                    'sell_leg':f'Iron condor — ${nc:.2f} credit',
+                    'buy_leg':f'SELL ${sc:.0f}C / BUY ${lc:.0f}C  +  SELL ${sp:.0f}P / BUY ${lp:.0f}P',
+                    'sell_leg':f'Iron condor — collect ${nc:.2f} credit',
+                    'is_condor':True,
+                    'condor_legs':condor_legs,
+                    'short_call':sc,'long_call':lc,'short_put':sp,'long_put':lp,
                     'net_debit':-nc,'max_profit':nc,'breakeven':round((sp+sc)/2,2),
                     'entry':nc,'profit_target':pt,'stop_loss':sl,'return_on_debit':rp,
                     'contracts_per_10k':contracts,'capital_at_risk':round(contracts*ml*100),
@@ -1309,6 +1323,8 @@ def api_scan():
                 'tags':tags,
                 'expiration':spread['expiration'],'dte':spread['dte'],
                 'buy_leg':spread['buy_leg'],'sell_leg':spread['sell_leg'],
+                'is_condor':spread.get('is_condor',False),
+                'condor_legs':spread.get('condor_legs',None),
                 'net_debit':spread['entry'],'max_profit':spread['max_profit'],
                 'breakeven':spread['breakeven'],'entry':spread['entry'],
                 'profit_target':spread['profit_target'],'stop_loss':spread['stop_loss'],
@@ -1453,95 +1469,154 @@ def api_review():
             except:
                 pass
 
-            # Parse strikes from structure string
-            # Format: "Buy 000 call / Sell 010 call"
-            buy_strike = sell_strike = None
-            contract_type = 'CALL'
-            try:
-                import re as _re
-                nums = _re.findall(r'\$(\d+)', structure)
-                if len(nums) >= 2:
-                    buy_strike  = float(nums[0])
-                    sell_strike = float(nums[1])
-                if 'put' in structure.lower():
-                    contract_type = 'PUT'
-            except:
-                pass
+            # Detect trade type from structure string
+            import re as _re
+            has_call = 'call' in structure.lower() or 'c /' in structure.lower() or 'c ' in structure.lower()
+            has_put  = 'put'  in structure.lower() or 'p /' in structure.lower() or 'p ' in structure.lower()
+            all_nums = [float(n) for n in _re.findall(r'\$(\d+(?:\.\d+)?)', structure)]
+            # Iron condor = 4 strikes AND both calls and puts present
+            is_condor = (len(all_nums) >= 4) and has_call and has_put
 
-            # Fetch live options chain
+            # Helper to read mark for a strike from a strikes_dict
+            def _mark_from(sd, strike):
+                tolerance = max(2.6, strike * 0.015)
+                best_key, best_diff = None, 999.0
+                for k in sd:
+                    try:
+                        d = abs(float(k) - strike)
+                        if d < best_diff:
+                            best_diff = d; best_key = k
+                    except: continue
+                if best_key is None or best_diff > tolerance: return None
+                val = sd[best_key]
+                opts = val if isinstance(val, list) else (list(val.values())[0] if isinstance(val, dict) and val else [])
+                if not opts: return None
+                o = opts[0]
+                m = o.get('mark', 0) or 0
+                if m > 0: return m
+                b = o.get('bid', 0) or 0
+                a = o.get('ask', 0) or 0
+                return (b + a) / 2 if (b + a) > 0 else None
+
             current_value = None
-            if buy_strike and sell_strike and exp_date:
+
+            if is_condor and exp_date:
+                # Condor: structure is "SELL $Xc / BUY $Yc + SELL $Zp / BUY $Wp"
+                # Strike order in string: short_call, long_call, short_put, long_put
                 try:
-                    ct = contract_type
-                    resp = schwab_call(
-                        client.get_option_chain,
-                        symbol=ticker,
-                        contract_type=ct,
-                        strike_count=30,
-                        include_underlying_quote=True,
-                        strategy='SINGLE'
-                    )
+                    sc, lc, sp_, lp_ = all_nums[0], all_nums[1], all_nums[2], all_nums[3]
+                    # Need both call and put chains
+                    resp = schwab_call(client.get_option_chain, symbol=ticker,
+                                       contract_type='ALL', strike_count=40,
+                                       include_underlying_quote=True, strategy='SINGLE')
                     if resp:
                         chain = resp.json()
-                        exp_map = chain.get(
-                            'callExpDateMap' if ct == 'CALL' else 'putExpDateMap', {})
-                        # Find the right expiration
+                        calls = chain.get('callExpDateMap', {})
+                        puts  = chain.get('putExpDateMap', {})
+                        def find_exp(m):
+                            for es, sd in m.items():
+                                try:
+                                    ed = datetime.strptime(es.split(':')[0], '%Y-%m-%d').date()
+                                    if ed == exp_date: return sd
+                                except: continue
+                            return None
+                        cdict = find_exp(calls); pdict = find_exp(puts)
+                        if cdict and pdict:
+                            sc_m = _mark_from(cdict, sc); lc_m = _mark_from(cdict, lc)
+                            sp_m = _mark_from(pdict, sp_); lp_m = _mark_from(pdict, lp_)
+                            if None not in (sc_m, lc_m, sp_m, lp_m):
+                                # Current cost to CLOSE the condor (buy back shorts, sell longs)
+                                # = (short_call - long_call) + (short_put - long_put)
+                                current_value = round((sc_m - lc_m) + (sp_m - lp_m), 2)
+                except Exception as e:
+                    print(f'Condor review error {ticker}: {e}')
+            elif exp_date and len(all_nums) >= 2:
+                # Vertical spread: 2 strikes
+                buy_strike  = all_nums[0]
+                sell_strike = all_nums[1]
+                ct = 'PUT' if (has_put and not has_call) else 'CALL'
+                try:
+                    resp = schwab_call(client.get_option_chain, symbol=ticker,
+                                       contract_type=ct, strike_count=30,
+                                       include_underlying_quote=True, strategy='SINGLE')
+                    if resp:
+                        chain = resp.json()
+                        exp_map = chain.get('callExpDateMap' if ct == 'CALL' else 'putExpDateMap', {})
                         for exp_str, strikes_dict in exp_map.items():
                             try:
                                 ed = datetime.strptime(exp_str.split(':')[0], '%Y-%m-%d').date()
                                 if ed != exp_date: continue
                             except: continue
-                            # Get marks for both strikes
-                            def get_mark(sd, strike):
-                                # Tolerance scales with strike price — avoids wrong strike matches
-                                tolerance = max(2.6, strike * 0.015)
-                                best_key, best_diff = None, 999.0
-                                for k in sd:
-                                    try:
-                                        d = abs(float(k) - strike)
-                                        if d < best_diff:
-                                            best_diff = d; best_key = k
-                                    except: continue
-                                if best_key is None or best_diff > tolerance: return None
-                                val = sd[best_key]
-                                opts = val if isinstance(val, list) else (list(val.values())[0] if isinstance(val, dict) and val else [])
-                                if not opts: return None
-                                o = opts[0]
-                                m = o.get('mark', 0) or 0
-                                if m > 0: return m
-                                b = o.get('bid', 0) or 0
-                                a = o.get('ask', 0) or 0
-                                return (b + a) / 2 if (b + a) > 0 else None
-                            buy_mark  = get_mark(strikes_dict, buy_strike)
-                            sell_mark = get_mark(strikes_dict, sell_strike)
+                            buy_mark  = _mark_from(strikes_dict, buy_strike)
+                            sell_mark = _mark_from(strikes_dict, sell_strike)
                             if buy_mark is not None and sell_mark is not None:
                                 current_value = round(buy_mark - sell_mark, 2)
                             break
                 except Exception as e:
                     print(f'Review error {ticker}: {e}')
 
-            # Determine action
+            # Determine action — condors and verticals behave OPPOSITELY
             pnl = None
             pnl_pct = None
             action = 'HOLD'
             action_detail = ''
             urgency = 'normal'  # normal / warn / critical
 
-            if current_value is not None and debit > 0:
+            if current_value is not None and is_condor:
+                # CONDOR: you collected `debit` as a credit at entry.
+                # current_value = cost to buy it back now.
+                # Profit when current_value DROPS below the credit received.
+                # target = 50% of credit (buy back cheap), stop = 2x credit.
+                credit = debit  # for condors the "debit" field stores the credit received
+                pnl = round((credit - current_value) * 100 * contracts, 2)
+                pnl_pct = round((credit - current_value) / credit * 100, 1) if credit > 0 else 0
+
+                if current_value <= target:
+                    action = 'CLOSE — TARGET HIT'
+                    action_detail = f'Condor at ${current_value:.2f} (collected ${credit:.2f}) — BUY the iron condor to close, lock in profit'
+                    urgency = 'critical'
+                elif current_value >= stop:
+                    action = 'CLOSE — STOP HIT'
+                    action_detail = f'Condor at ${current_value:.2f} vs ${credit:.2f} credit — cancel target order, BUY to close at market'
+                    urgency = 'critical'
+                elif dte is not None and dte <= 21:
+                    action = 'CLOSE — 21 DTE RULE'
+                    action_detail = f'{dte} days left — gamma risk rises near expiry, BUY the condor to close regardless of P&L'
+                    urgency = 'critical'
+                elif dte is not None and dte <= 25:
+                    action = 'PREPARE TO CLOSE'
+                    action_detail = f'{dte} days left — approaching 21 DTE exit rule, monitor closely'
+                    urgency = 'warn'
+                elif current_value >= stop * 0.75:
+                    action = 'WATCH — APPROACHING STOP'
+                    action_detail = f'Condor at ${current_value:.2f}, stop is ${stop:.2f} — price moving against you'
+                    urgency = 'warn'
+                elif current_value <= target * 1.25:
+                    action = 'NEAR TARGET'
+                    action_detail = f'Condor at ${current_value:.2f}, target is ${target:.2f} — close approaching'
+                    urgency = 'warn'
+                else:
+                    action = 'HOLD'
+                    action_detail = f'Condor at ${current_value:.2f} — between target (${target:.2f}) and stop (${stop:.2f})'
+                    urgency = 'normal'
+
+            elif current_value is not None and debit > 0:
+                # VERTICAL spread (bull call / bear put): you paid `debit`.
+                # Profit when current_value RISES above debit.
                 pnl = round((current_value - debit) * 100 * contracts, 2)
                 pnl_pct = round((current_value - debit) / debit * 100, 1)
 
                 if current_value >= target:
                     action = 'CLOSE — TARGET HIT'
-                    action_detail = f'Spread at ${current_value:.2f} — sell vertical to close, take your profit'
+                    action_detail = f'Spread at ${current_value:.2f} — SELL the vertical to close, take your profit'
                     urgency = 'critical'
                 elif current_value <= stop:
                     action = 'CLOSE — STOP HIT'
-                    action_detail = f'Spread at ${current_value:.2f} — cancel profit target order, close at market'
+                    action_detail = f'Spread at ${current_value:.2f} — cancel profit target order, SELL to close at market'
                     urgency = 'critical'
                 elif dte is not None and dte <= 21:
                     action = 'CLOSE — 21 DTE RULE'
-                    action_detail = f'{dte} days left — time decay accelerates from here, close regardless of P&L'
+                    action_detail = f'{dte} days left — time decay accelerates from here, SELL the vertical to close regardless of P&L'
                     urgency = 'critical'
                 elif dte is not None and dte <= 25:
                     action = 'PREPARE TO CLOSE'
@@ -1580,6 +1655,7 @@ def api_review():
                 'action':        action,
                 'action_detail': action_detail,
                 'urgency':       urgency,
+                'is_condor':     is_condor,
             })
 
         return jsonify({'results': results, 'as_of': datetime.now().strftime('%b %d %Y %H:%M')})
