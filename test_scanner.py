@@ -507,6 +507,23 @@ check('20% return rejected', in_band(20), False)
 check('60% return rejected', in_band(60), False)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Entry DTE window vs 21 DTE exit rule')
+ENTRY_MIN, ENTRY_MAX = 30, 45
+EXIT_DTE = 21
+def valid_entry_dte(dte): return ENTRY_MIN <= dte <= ENTRY_MAX
+check('18 DTE rejected (below entry floor)', valid_entry_dte(18), False)
+check('20 DTE rejected (below entry floor)', valid_entry_dte(20), False)
+check('30 DTE accepted (entry floor)',       valid_entry_dte(30), True)
+check('45 DTE accepted (entry ceiling)',     valid_entry_dte(45), True)
+check('46 DTE rejected (above ceiling)',     valid_entry_dte(46), False)
+# The crucial invariant: entry floor must exceed the exit rule with runway
+check('Entry floor is above 21 DTE exit',    ENTRY_MIN > EXIT_DTE, True)
+check('At least 7 days runway after entry',  ENTRY_MIN - EXIT_DTE >= 7, True)
+# Earnings filter must cover the full entry window
+EARN_LOOKAHEAD = 47
+check('Earnings filter covers max entry DTE', EARN_LOOKAHEAD >= ENTRY_MAX, True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:

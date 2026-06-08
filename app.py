@@ -849,7 +849,11 @@ def get_best_spread(client, symbol, price, regime):
                 dte      = int(parts[1]) if len(parts) > 1 else (exp_date - today).days
             except:
                 continue
-            if not (18 <= dte <= 42):   # slightly wider window: 18-42
+            # Entry window: 30-45 DTE. Floor is well above the 21 DTE exit rule
+            # so every trade has at least ~9 days of runway before the 21 DTE
+            # close kicks in. Entering below 30 DTE would risk recommending a
+            # trade the Daily Review flags to close almost immediately.
+            if not (30 <= dte <= 45):
                 continue
 
             strikes = sorted([float(k) for k in strikes_dict.keys()])
@@ -1027,7 +1031,7 @@ def get_iron_condor(client, symbol, price):
                 exp_date=datetime.strptime(parts[0],'%Y-%m-%d').date()
                 dte=int(parts[1]) if len(parts)>1 else (exp_date-today).days
             except: continue
-            if not(18<=dte<=38): continue
+            if not(30<=dte<=45): continue  # 30-45 DTE: runway above 21 DTE exit
             cs=sorted([float(k) for k in calls[exp_str].keys()])
             ps=sorted([float(k) for k in puts.get(exp_str,{}).keys()])
             if not cs or not ps: continue
@@ -1340,7 +1344,7 @@ def api_scan():
                                      live_price=live_prices.get(symbol))
             screened+=1
             if result:
-                has_earn,earn_date=has_earnings_soon(client,symbol,days_ahead=38)
+                has_earn,earn_date=has_earnings_soon(client,symbol,days_ahead=47)
                 if has_earn:
                     print(f'  Skipping {symbol} — earnings {earn_date}')
                     emit(f'Skip {symbol} — earnings {earn_date}', detail=True)
