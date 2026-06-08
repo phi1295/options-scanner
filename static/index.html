@@ -204,7 +204,12 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
 .stat-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:6px}
 .stat-val{font-size:22px;font-weight:500;font-family:'DM Mono',monospace}
-.stat-val.green{color:var(--green)}.stat-val.red{color:var(--red)}
+.stat-val.green{color:var(--green)}.stat-val.red{color:var(--red)}.stat-val.amber{color:var(--amber)}
+.stat-sub{font-size:10px;color:var(--text3);font-family:'DM Mono',monospace;margin-top:4px}
+.perf-verdict{grid-column:1/-1;padding:12px 16px;border-radius:var(--rs);font-size:13px;line-height:1.5}
+.perf-verdict.good{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.3)}
+.perf-verdict.ok{background:var(--ad);color:var(--amber);border:1px solid rgba(246,176,66,.3)}
+.perf-verdict.bad{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.3)}
 .log-controls{display:flex;gap:10px;margin-bottom:18px;align-items:center}
 .log-filter{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rs);padding:8px 12px;color:var(--text);font-size:13px;font-family:'DM Sans',sans-serif;cursor:pointer}
 .clear-btn{margin-left:auto;padding:8px 14px;background:none;border:1px solid var(--border);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif}
@@ -1420,16 +1425,61 @@ function saveEditModal() {
 function renderLog() {
   const filter = document.getElementById('logFilter').value;
   const filtered = filter==='all'?tradeLog:tradeLog.filter(t=>t.status===filter);
-  const closed=tradeLog.filter(t=>t.status==='won'||t.status==='lost');
-  const won=tradeLog.filter(t=>t.status==='won').length;
-  const wr=closed.length?Math.round(won/closed.length*100):0;
-  const pnl=tradeLog.reduce((s,t)=>s+(t.pnl||0),0);
-  const open=tradeLog.filter(t=>t.status==='open').length;
+
+  // ── Performance stats — all derived from the same status/pnl fields ────
+  // Status values (consistent across the app): open / won / lost / expired
+  // An expired trade is treated as a closed loss (debit spread expired worthless).
+  const closedTrades = tradeLog.filter(t=>t.status==='won'||t.status==='lost'||t.status==='expired');
+  const winners  = tradeLog.filter(t=>t.status==='won');
+  // Losers = explicit losses AND expired trades (both are realized losses)
+  const losers   = tradeLog.filter(t=>t.status==='lost'||t.status==='expired');
+  const won = winners.length;
+  const wr = closedTrades.length ? Math.round(won/closedTrades.length*100) : 0;
+  const totalPnl = tradeLog.reduce((s,t)=>s+(t.pnl||0),0);
+  const open = tradeLog.filter(t=>t.status==='open').length;
+
+  // Average win / average loss (P&L in dollars) — same pnl field
+  const avgWin  = winners.length ? winners.reduce((s,t)=>s+(t.pnl||0),0)/winners.length : 0;
+  const avgLoss = losers.length  ? losers.reduce((s,t)=>s+(t.pnl||0),0)/losers.length  : 0;
+
+  // Average return % on closed trades that have a debit and exit price
+  const withReturn = closedTrades.filter(t=>t.debit>0 && t.exitPrice!==null && t.exitPrice!==undefined);
+  const avgReturnPct = withReturn.length
+    ? Math.round(withReturn.reduce((s,t)=>s+((t.exitPrice-t.debit)/t.debit*100),0)/withReturn.length)
+    : 0;
+
+  // Profit factor = gross wins / gross losses (a key edge metric)
+  const grossWin  = winners.reduce((s,t)=>s+(t.pnl||0),0);
+  const grossLoss = Math.abs(losers.reduce((s,t)=>s+(t.pnl||0),0));
+  const profitFactor = grossLoss>0 ? (grossWin/grossLoss) : (grossWin>0 ? Infinity : 0);
+
+  // Expectancy per trade = average P&L across all closed trades
+  const expectancy = closedTrades.length
+    ? closedTrades.reduce((s,t)=>s+(t.pnl||0),0)/closedTrades.length : 0;
+
   document.getElementById('logStats').innerHTML=`
-    <div class="stat-card"><div class="stat-lbl">Total</div><div class="stat-val">${tradeLog.length}</div></div>
-    <div class="stat-card"><div class="stat-lbl">Win rate</div><div class="stat-val ${wr>=50?'green':'red'}">${wr}%</div></div>
+    <div class="stat-card"><div class="stat-lbl">Total trades</div><div class="stat-val">${tradeLog.length}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Win rate</div><div class="stat-val ${wr>=50?'green':'red'}">${wr}%</div><div class="stat-sub">${won}/${closedTrades.length} closed</div></div>
     <div class="stat-card"><div class="stat-lbl">Open</div><div class="stat-val">${open}</div></div>
-    <div class="stat-card"><div class="stat-lbl">Total P&L</div><div class="stat-val ${pnl>=0?'green':'red'}">${pnl>=0?'+':''}$${pnl.toFixed(0)}</div></div>`;
+    <div class="stat-card"><div class="stat-lbl">Total P&L</div><div class="stat-val ${totalPnl>=0?'green':'red'}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Avg win</div><div class="stat-val green">${avgWin>0?'+':''}$${avgWin.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Avg loss</div><div class="stat-val red">$${avgLoss.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Avg return</div><div class="stat-val ${avgReturnPct>=0?'green':'red'}">${avgReturnPct>=0?'+':''}${avgReturnPct}%</div></div>
+    <div class="stat-card"><div class="stat-lbl">Profit factor</div><div class="stat-val ${profitFactor>=1.5?'green':profitFactor>=1?'amber':'red'}">${profitFactor===Infinity?'∞':profitFactor.toFixed(2)}</div><div class="stat-sub">expectancy ${expectancy>=0?'+':''}$${expectancy.toFixed(0)}/trade</div></div>`;
+
+  if (closedTrades.length >= 5) {
+    const verdict = profitFactor >= 1.5
+      ? 'Your edge is holding — the system is profitable over this sample.'
+      : profitFactor >= 1
+      ? 'Marginally profitable. Keep sample size growing before judging.'
+      : 'Losing money over this sample. Review whether you are following exits and sizing.';
+    document.getElementById('logStats').innerHTML +=
+      `<div class="perf-verdict ${profitFactor>=1.5?'good':profitFactor>=1?'ok':'bad'}">${verdict} <span style="color:var(--text3)">(${closedTrades.length} closed trades)</span></div>`;
+  } else if (tradeLog.length > 0) {
+    document.getElementById('logStats').innerHTML +=
+      `<div class="perf-verdict ok">Log ${closedTrades.length} of ~20-30 closed trades before judging performance — small samples mislead.</div>`;
+  }
+
   if (!filtered.length) { document.getElementById('logContent').innerHTML='<div class="log-empty"><p style="color:var(--text2);font-size:14px">No trades yet.</p></div>'; return; }
   let html=`<table class="log-table"><thead><tr><th>Ticker</th><th>Structure</th><th>Date</th><th>Debit</th><th>Target</th><th>Stop</th><th>Qty</th><th>IBD RS</th><th>Status</th><th>Exit</th><th>P&L</th><th></th></tr></thead><tbody>`;
   filtered.forEach(t=>{
@@ -1460,7 +1510,22 @@ function renderLog() {
   html+='</tbody></table>';
   document.getElementById('logContent').innerHTML=html;
 }
-function updateStatus(id,s){const t=tradeLog.find(t=>t.id===id);if(t){t.status=s;localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
+function updateStatus(id,s){
+  const t=tradeLog.find(t=>t.id===id);
+  if(t){
+    t.status=s;
+    // An expired debit spread that finished out-of-the-money is a total loss
+    // of the debit. Set P&L consistently so the stats reflect reality.
+    if(s==='expired' && (t.exitPrice===null || t.exitPrice===undefined)){
+      t.exitPrice=0;
+      t.pnl=-(t.debit*100*t.contracts);
+    }
+    // If moved back to open, clear the exit/pnl so it isn't counted as closed
+    if(s==='open'){ t.exitPrice=null; t.pnl=null; }
+    localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));
+    renderLog();
+  }
+}
 function updatePnl(id,ep,debit,contracts){const t=tradeLog.find(t=>t.id===id);if(t&&ep){const e=parseFloat(ep);t.exitPrice=e;t.pnl=(e-debit)*100*contracts;t.status=t.pnl>=0?'won':'lost';localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
 function deleteTrade(id){if(confirm('Delete?')){tradeLog=tradeLog.filter(t=>t.id!==id);localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
 function clearLog(){if(confirm('Clear all trades?')){tradeLog=[];localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}

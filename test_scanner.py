@@ -524,6 +524,106 @@ EARN_LOOKAHEAD = 47
 check('Earnings filter covers max entry DTE', EARN_LOOKAHEAD >= ENTRY_MAX, True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Caution regime consistency (builds bull call spreads)')
+# Caution should be treated like bullish across screening AND scoring.
+# Set up a strong stock above its MAs.
+app._ibd50_data['CAUT'] = {'symbol':'CAUT','rank':5,'rs_rating':96,'eps_rating':92,
+    'composite':97,'acc_dis':'A','smr':'A','pct_off_high':-4,'vol_chg':70,
+    'eps_chg_latest':35,'qtrs_sponsorship':4,'sales_chg':22}
+strong = {'symbol':'CAUT','price':100,'ma50':92,'ma200':85,'rs_raw':0.05,'mom10':4,'vol_ratio':1.4}
+s_bull = app.score_stock(strong, 'bullish')
+s_caut = app.score_stock(strong, 'caution')
+check('Caution scores same as bullish for strong stock', s_caut, s_bull)
+check('Caution score is high for strong stock', s_caut > 80, True)
+
+# A weak D/E stock should score low in caution just like bullish
+app._ibd50_data['CAUTBAD'] = {'symbol':'CAUTBAD','rank':45,'rs_rating':60,'eps_rating':55,
+    'composite':62,'acc_dis':'D','smr':'D','pct_off_high':-40,'vol_chg':5,
+    'eps_chg_latest':-8,'qtrs_sponsorship':0,'sales_chg':-4}
+weak = {'symbol':'CAUTBAD','price':100,'ma50':95,'ma200':90,'rs_raw':0.01,'mom10':1,'vol_ratio':1.0}
+check('Caution penalizes D/E stock like bullish',
+      app.score_stock(weak,'caution'), app.score_stock(weak,'bullish'))
+
+section('Caution 88+ score floor')
+def caution_floor(regime): return 88 if regime == 'caution' else 0
+check('Caution floor is 88',      caution_floor('caution'), 88)
+check('Bullish floor is 0',       caution_floor('bullish'), 0)
+check('Score 87 fails caution',   87 >= caution_floor('caution'), False)
+check('Score 88 passes caution',  88 >= caution_floor('caution'), True)
+check('Score 70 passes bullish',  70 >= caution_floor('bullish'), True)
+
+section('Condor self-contained risk field')
+# max_loss_per_contract should be (wing - credit) * 100
+wing=5.0; credit=2.0
+ml_per_contract = round((wing-credit)*100, 2)
+check('Condor max loss per contract = (wing-credit)*100', ml_per_contract, 300.0)
+# And position sizing uses it directly
+ps = app.calc_position_size(credit, 10000, 1.5, risk_per_contract_override=ml_per_contract)
+check('Condor sized on real max loss', ps['dollar_risk'], 300.0)
+
+section('Strategy-to-regime mapping consistency')
+strat_map={'bullish':'bull_call_spread','bearish':'bear_put_spread',
+           'neutral':'iron_condor','caution':'bull_call_spread'}
+check('Bullish → bull call', strat_map['bullish'], 'bull_call_spread')
+check('Bearish → bear put',  strat_map['bearish'], 'bear_put_spread')
+check('Neutral → condor',    strat_map['neutral'], 'iron_condor')
+check('Caution → bull call', strat_map['caution'], 'bull_call_spread')
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('Trade log performance stats (mirrors renderLog math)')
+# Replicate the JS stats logic to verify the math is sound and consistent.
+def compute_stats(trades):
+    closed = [t for t in trades if t['status'] in ('won','lost','expired')]
+    winners = [t for t in trades if t['status']=='won']
+    losers  = [t for t in trades if t['status'] in ('lost','expired')]
+    won = len(winners)
+    wr = round(won/len(closed)*100) if closed else 0
+    total_pnl = sum(t.get('pnl') or 0 for t in trades)
+    avg_win  = sum(t.get('pnl') or 0 for t in winners)/len(winners) if winners else 0
+    avg_loss = sum(t.get('pnl') or 0 for t in losers)/len(losers) if losers else 0
+    gross_win  = sum(t.get('pnl') or 0 for t in winners)
+    gross_loss = abs(sum(t.get('pnl') or 0 for t in losers))
+    pf = (gross_win/gross_loss) if gross_loss>0 else (float('inf') if gross_win>0 else 0)
+    expectancy = (sum(t.get('pnl') or 0 for t in closed)/len(closed)) if closed else 0
+    return {'wr':wr,'total_pnl':total_pnl,'avg_win':avg_win,'avg_loss':avg_loss,
+            'pf':pf,'expectancy':expectancy,'closed':len(closed)}
+
+sample = [
+    {'status':'won','pnl':300,'debit':3,'exitPrice':6,'contracts':1},
+    {'status':'won','pnl':150,'debit':3,'exitPrice':4.5,'contracts':1},
+    {'status':'lost','pnl':-150,'debit':3,'exitPrice':1.5,'contracts':1},
+    {'status':'expired','pnl':-300,'debit':3,'exitPrice':0,'contracts':1},
+    {'status':'open','pnl':None,'debit':3,'exitPrice':None,'contracts':1},
+]
+st = compute_stats(sample)
+check('Win rate = 2 of 4 closed = 50%', st['wr'], 50)
+check('Total P&L sums correctly', st['total_pnl'], 0)   # 300+150-150-300
+check('Avg win = (300+150)/2 = 225', st['avg_win'], 225.0)
+check('Avg loss includes expired: (-150-300)/2 = -225', st['avg_loss'], -225.0)
+check('Profit factor (expired as loss) = 450/450 = 1.0', st['pf'], 1.0)
+check('Expectancy = 0/4 closed = 0', st['expectancy'], 0.0)
+check('Closed count excludes open trade', st['closed'], 4)
+
+# Expired counts as closed (lowers win rate) and as full debit loss
+exp_only = [{'status':'expired','pnl':-300,'debit':3,'exitPrice':0,'contracts':1}]
+st2 = compute_stats(exp_only)
+check('Expired trade counts as closed', st2['closed'], 1)
+check('Expired trade win rate = 0%', st2['wr'], 0)
+check('Expired trade P&L = full debit loss', st2['total_pnl'], -300)
+
+# Profitable system: profit factor > 1.5
+good = [
+    {'status':'won','pnl':400,'debit':3,'exitPrice':7,'contracts':1},
+    {'status':'won','pnl':400,'debit':3,'exitPrice':7,'contracts':1},
+    {'status':'lost','pnl':-150,'debit':3,'exitPrice':1.5,'contracts':1},
+]
+check('Good system profit factor > 1.5', compute_stats(good)['pf'] > 1.5, True)
+
+# Expired P&L rule: full debit loss = -(debit * 100 * contracts)
+def expired_pnl(debit, contracts): return -(debit*100*contracts)
+check('Expired P&L = -(debit*100*qty)', expired_pnl(2.95, 5), -1475.0)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:

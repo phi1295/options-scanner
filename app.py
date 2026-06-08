@@ -603,13 +603,13 @@ def score_stock(stock, regime):
     else:
         # No IBD data — use price-based RS proxy
         rs_raw = stock['rs_raw']
-        if regime == 'bullish':   s += min(rs_raw*400, 15)
-        elif regime == 'bearish': s += min(-rs_raw*400, 15)
+        if regime in ('bullish', 'caution'): s += min(rs_raw*400, 15)
+        elif regime == 'bearish':            s += min(-rs_raw*400, 15)
 
     mom = stock['mom10']
     vr  = stock['vol_ratio']
 
-    if regime == 'bullish':
+    if regime in ('bullish', 'caution'):
         s += min(mom*1.2, 8)
         if vr > 1.3: s += 3
         if stock['ma200']:
@@ -715,16 +715,18 @@ def screen_stock(client, symbol, spy_df, regime, live_price=None):
         ma50 =c[-50:].mean()  if len(c)>=50  else None
         ma200=c[-200:].mean() if len(c)>=200 else None
 
-        if regime=='bullish':
+        if regime in ('bullish', 'caution'):
+            # Caution builds bull call spreads, so it needs the same uptrend
+            # filter as bullish — stock must be above both moving averages.
             if not(ma50 and ma200) or price<ma50 or price<ma200: return None
         elif regime=='bearish':
             if not ma50 or price>ma50: return None
         elif regime=='neutral':
             if not ma50 or abs(price-ma50)/ma50>0.08: return None
 
-        # IBD ACC/DIS override — never buy D/E stocks in bullish regime
+        # IBD ACC/DIS override — never buy D/E stocks in bullish or caution
         ibd = ibd50_get(symbol)
-        if regime=='bullish' and ibd and is_bad_acc_dis(ibd.get('acc_dis','')):
+        if regime in ('bullish','caution') and ibd and is_bad_acc_dis(ibd.get('acc_dis','')):
             return None  # Institutional selling — skip
 
         rs_raw=calc_rs_score(df,spy_df)
@@ -735,8 +737,8 @@ def screen_stock(client, symbol, spy_df, regime, live_price=None):
             avg=df['volume'].values[-20:].mean()
             vol_ratio=df['volume'].values[-1]/avg if avg>0 else 1
 
-        # IBD % off High override — skip stocks >35% off high in bullish
-        if regime=='bullish' and ibd:
+        # IBD % off High override — skip stocks >35% off high in bullish/caution
+        if regime in ('bullish','caution') and ibd:
             poh=abs(ibd.get('pct_off_high') or 0)
             if poh>35: return None
 
@@ -960,10 +962,9 @@ def get_best_spread(client, symbol, price, regime):
                     'delta': round(buy_delta, 2),
                     'theta': round(buy_theta, 3),
                 }
-                # Selection logic:
-                # 1. Prefer return >= 80% (exit at 50% = ~40% gain on debit)
-                # 2. Among valid results, prefer highest return
-                # 3. Tiebreak: shorter DTE (less time risk)
+                # Selection logic (return band is 25-50% per strategy):
+                # 1. Among valid results, prefer the highest return on debit
+                # 2. Tiebreak: shorter DTE (less time risk, closes sooner)
                 if best_result is None:
                     best_result = result
                 else:
@@ -1075,6 +1076,7 @@ def get_iron_condor(client, symbol, price):
                     'net_debit':-nc,'max_profit':nc,'breakeven':round((sp+sc)/2,2),
                     'entry':nc,'profit_target':pt,'stop_loss':sl,'return_on_debit':rp,
                     'contracts_per_10k':contracts,'capital_at_risk':round(contracts*ml*100),
+                    'max_loss_per_contract':round(ml*100,2),
                     'buy_oi':sc_oi,'sell_oi':sp_oi,'iv':round(avg_iv*100,1),'delta':0,'theta':0}
     except Exception as e:
         print(f'Condor error {symbol}: {e}')
@@ -1366,8 +1368,15 @@ def api_scan():
         strat_map={'bullish':'bull_call_spread','bearish':'bear_put_spread','neutral':'iron_condor','caution':'bull_call_spread'}
         trades=[]
 
+        # Caution regime: only trade the very strongest setups (score >= 88).
+        # This enforces the protection rule shown in the regime banner.
+        score_floor = 88 if regime == 'caution' else 0
+
         for stock in candidates[:20]:
             sym=stock['symbol']
+            if stock['score'] < score_floor:
+                print(f'  Skipping {sym} — score {stock["score"]} below caution floor {score_floor}')
+                continue
 
             spread=get_iron_condor(client,sym,stock['price']) if regime=='neutral' \
                    else get_best_spread(client,sym,stock['price'],regime)
@@ -1380,10 +1389,13 @@ def api_scan():
             # Risk-based position size recommendation.
             # Verticals: risk = 50% of debit (the stop). Condors: real max loss per contract.
             if spread.get('is_condor'):
-                # Condor max loss per contract = wing width - credit, in dollars.
-                # capital_at_risk / contracts gives per-contract max loss.
-                cpc = spread.get('contracts_per_10k', 1) or 1
-                condor_risk_per_contract = (spread.get('capital_at_risk', 0) / cpc) if cpc else 0
+                # Condor max loss per contract = (wing width - credit) * 100, computed
+                # directly from the spread's own fields (no dependency on legacy sizing).
+                condor_risk_per_contract = spread.get('max_loss_per_contract')
+                if not condor_risk_per_contract:
+                    # Fallback: derive from capital_at_risk if present
+                    cpc = spread.get('contracts_per_10k', 1) or 1
+                    condor_risk_per_contract = (spread.get('capital_at_risk', 0) / cpc) if cpc else 0
                 psize = calc_position_size(spread['entry'], account_size, risk_pct,
                                            risk_per_contract_override=condor_risk_per_contract)
             else:
