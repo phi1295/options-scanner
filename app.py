@@ -6,7 +6,7 @@ Options Trade Scanner v4
 Run: python app.py
 """
 
-import os, json, math, time, webbrowser, threading, csv, io, pathlib, re
+import os, json, math, time, webbrowser, threading, csv, io, pathlib, re, sqlite3
 from datetime import datetime, timedelta, date
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
@@ -26,6 +26,44 @@ SCHWAB_KEY    = _config.get('schwab_client_id',     os.environ.get('SCHWAB_APP_K
 SCHWAB_SECRET = _config.get('schwab_client_secret', os.environ.get('SCHWAB_APP_SECRET', ''))
 CALLBACK_URL  = 'https://127.0.0.1:8182'
 TOKEN_PATH    = str(pathlib.Path(__file__).parent / 'schwab_token.json')
+
+# ── SQLite storage (single portable file: scanner.db) ─────────────────────────
+# This file holds trades + settings, shared across all clients (Mac, phone).
+# To move to another machine, just copy scanner.db — it's fully self-contained.
+DB_PATH = str(pathlib.Path(__file__).parent / 'scanner.db')
+_db_lock = threading.Lock()
+
+def db_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')      # safe concurrent reads/writes
+    return conn
+
+def init_db():
+    """Create tables if they don't exist. Safe to call on every startup."""
+    with _db_lock, db_conn() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id          INTEGER PRIMARY KEY,
+            ticker      TEXT, company TEXT, structure TEXT, expiration TEXT,
+            entryDate   TEXT, contracts INTEGER, debit REAL,
+            target      REAL, stop REAL, returnPct REAL, notes TEXT,
+            status      TEXT DEFAULT 'open',
+            exitPrice   REAL, pnl REAL,
+            ibd_rs      INTEGER, ibd_score INTEGER,
+            is_condor   INTEGER DEFAULT 0,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY, value TEXT
+        )''')
+        conn.commit()
+
+# Columns the trades table accepts — used to filter incoming JSON safely
+_TRADE_COLS = ['id','ticker','company','structure','expiration','entryDate',
+               'contracts','debit','target','stop','returnPct','notes','status',
+               'exitPrice','pnl','ibd_rs','ibd_score','is_condor']
+
+
 
 # ── Progress streaming (Server-Sent Events) ─────────────────────────────────
 import queue as _queue
@@ -1194,6 +1232,149 @@ def build_rationale(stock, spread, regime):
 @app.route('/')
 def index(): return send_from_directory('static','index.html')
 
+@app.route('/manifest.json')
+def manifest():
+    """PWA manifest — makes the app installable to a phone home screen."""
+    return jsonify({
+        "name": "Options Trade Scanner",
+        "short_name": "TradeScan",
+        "description": "Schwab + IBD options spread scanner",
+        "start_url": "/",
+        "display": "standalone",
+        "orientation": "portrait",
+        "background_color": "#0e0f11",
+        "theme_color": "#0e0f11",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}
+        ]
+    })
+
+@app.route('/icon-<size>.png')
+def app_icon(size):
+    """Generate a simple app icon on the fly (green 'TS' on dark)."""
+    try:
+        sz = 512 if '512' in size else 192
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new('RGB', (sz, sz), '#0e0f11')
+        d = ImageDraw.Draw(img)
+        margin = sz // 8
+        d.rounded_rectangle([margin, margin, sz-margin, sz-margin],
+                            radius=sz//10, fill='#15171a', outline='#2dd4a0', width=max(2, sz//64))
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", sz//3)
+        except:
+            font = ImageFont.load_default()
+        text = "TS"
+        bbox = d.textbbox((0,0), text, font=font)
+        tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+        d.text(((sz-tw)/2 - bbox[0], (sz-th)/2 - bbox[1]), text, fill='#2dd4a0', font=font)
+        import io
+        buf = io.BytesIO(); img.save(buf, 'PNG'); buf.seek(0)
+        from flask import Response
+        return Response(buf.getvalue(), mimetype='image/png')
+    except Exception:
+        import base64
+        from flask import Response
+        px = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
+        return Response(px, mimetype='image/png')
+
+# ── Trades storage (SQLite, shared across all clients) ───────────────────────
+@app.route('/api/trades', methods=['GET'])
+def get_trades():
+    """Return all trades, newest first (matches the old localStorage order)."""
+    with _db_lock, db_conn() as conn:
+        rows = conn.execute('SELECT * FROM trades ORDER BY id DESC').fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/trades', methods=['POST'])
+def add_trade():
+    """Insert a new trade. Accepts the trade JSON the frontend builds."""
+    t = request.get_json(silent=True) or {}
+    data = {k: t.get(k) for k in _TRADE_COLS}
+    if not data.get('id'):
+        data['id'] = int(time.time() * 1000)   # match Date.now() style ids
+    if not data.get('status'):
+        data['status'] = 'open'
+    cols = [k for k in _TRADE_COLS if data.get(k) is not None]
+    placeholders = ','.join('?' for _ in cols)
+    with _db_lock, db_conn() as conn:
+        conn.execute(f'INSERT OR REPLACE INTO trades ({",".join(cols)}) VALUES ({placeholders})',
+                     [data[c] for c in cols])
+        conn.commit()
+    return jsonify({'status': 'ok', 'id': data['id']})
+
+@app.route('/api/trades/<int:trade_id>', methods=['PUT'])
+def update_trade(trade_id):
+    """Update an existing trade (status change, exit price, edits)."""
+    t = request.get_json(silent=True) or {}
+    fields = {k: t.get(k) for k in _TRADE_COLS if k != 'id' and k in t}
+    if not fields:
+        return jsonify({'status': 'no_change'})
+    sets = ','.join(f'{k}=?' for k in fields)
+    with _db_lock, db_conn() as conn:
+        conn.execute(f'UPDATE trades SET {sets} WHERE id=?',
+                     list(fields.values()) + [trade_id])
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/trades/<int:trade_id>', methods=['DELETE'])
+def delete_trade(trade_id):
+    with _db_lock, db_conn() as conn:
+        conn.execute('DELETE FROM trades WHERE id=?', [trade_id])
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/trades/clear', methods=['POST'])
+def clear_trades():
+    with _db_lock, db_conn() as conn:
+        conn.execute('DELETE FROM trades')
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/trades/import', methods=['POST'])
+def import_trades():
+    """One-time bulk import (e.g. from the Mac's old localStorage)."""
+    payload = request.get_json(silent=True) or []
+    if not isinstance(payload, list):
+        return jsonify({'error': 'expected a list of trades'}), 400
+    imported = 0
+    with _db_lock, db_conn() as conn:
+        for t in payload:
+            data = {k: t.get(k) for k in _TRADE_COLS}
+            if not data.get('id'):
+                data['id'] = int(time.time() * 1000) + imported
+            if not data.get('status'):
+                data['status'] = 'open'
+            cols = [k for k in _TRADE_COLS if data.get(k) is not None]
+            placeholders = ','.join('?' for _ in cols)
+            conn.execute(f'INSERT OR REPLACE INTO trades ({",".join(cols)}) VALUES ({placeholders})',
+                         [data[c] for c in cols])
+            imported += 1
+        conn.commit()
+    return jsonify({'status': 'ok', 'imported': imported})
+
+# ── Settings storage (account size, risk %) ──────────────────────────────────
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    with _db_lock, db_conn() as conn:
+        rows = conn.execute('SELECT key, value FROM settings').fetchall()
+    out = {r['key']: r['value'] for r in rows}
+    # Defaults if not yet set
+    out.setdefault('account', '10000')
+    out.setdefault('risk_pct', '1.5')
+    return jsonify(out)
+
+@app.route('/api/settings', methods=['POST'])
+def save_settings():
+    s = request.get_json(silent=True) or {}
+    with _db_lock, db_conn() as conn:
+        for k, v in s.items():
+            conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                         [str(k), str(v)])
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
 @app.route('/api/auth/status')
 def api_auth_status():
     """Poll this to know if auth is needed / in progress / complete."""
@@ -1786,6 +1967,10 @@ if __name__=='__main__':
         print(f'  ○  IBD50: not loaded — upload via IBD50 Import tab')
 
     print(f'  ✓  Rate limiter: 80 req/min')
+
+    # ── Initialize SQLite storage (creates scanner.db if missing) ───────────
+    init_db()
+    print(f'  ✓  Database ready: {DB_PATH}')
 
     # ── Schwab auth — non-blocking, UI handles OAuth if needed ──────────────
     init_schwab()  # loads token if available, sets _auth_pending if not

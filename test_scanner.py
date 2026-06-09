@@ -624,6 +624,65 @@ def expired_pnl(debit, contracts): return -(debit*100*contracts)
 check('Expired P&L = -(debit*100*qty)', expired_pnl(2.95, 5), -1475.0)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('SQLite storage — trades & settings round-trip')
+import tempfile, os as _os
+_orig_db = app.DB_PATH
+app.DB_PATH = tempfile.mktemp(suffix='.db')
+app.init_db()
+_client = app.app.test_client()
+
+# Empty to start
+check('Trades empty initially', _client.get('/api/trades').get_json(), [])
+
+# Add
+_t = {'id':1,'ticker':'AMD','structure':'Buy $525 call / Sell $535 call',
+      'debit':3.0,'contracts':1,'target':6.5,'stop':1.5,'status':'open'}
+check('Add trade returns ok', _client.post('/api/trades', json=_t).get_json()['status'], 'ok')
+_rows = _client.get('/api/trades').get_json()
+check('One trade stored', len(_rows), 1)
+check('Trade ticker persisted', _rows[0]['ticker'], 'AMD')
+check('Trade debit persisted', _rows[0]['debit'], 3.0)
+
+# Update (status + pnl)
+_client.put('/api/trades/1', json={'status':'won','exitPrice':6.5,'pnl':350})
+_rows = _client.get('/api/trades').get_json()
+check('Status updated to won', _rows[0]['status'], 'won')
+check('P&L updated', _rows[0]['pnl'], 350)
+
+# Settings round-trip
+_client.post('/api/settings', json={'account':'25000','risk_pct':'2.0'})
+_s = _client.get('/api/settings').get_json()
+check('Account size persisted', _s['account'], '25000')
+check('Risk pct persisted', _s['risk_pct'], '2.0')
+check('Settings has defaults', 'account' in _client.get('/api/settings').get_json(), True)
+
+# Bulk import (the Mac→server migration path)
+_client.post('/api/trades/import', json=[
+    {'id':2,'ticker':'MU','debit':2.95,'contracts':1,'status':'open'},
+    {'id':3,'ticker':'LRCX','debit':1.9,'contracts':2,'status':'open'},
+])
+check('Import added 2 trades', len(_client.get('/api/trades').get_json()), 3)
+
+# Newest-first ordering (matches old localStorage unshift behavior)
+_rows = _client.get('/api/trades').get_json()
+check('Trades ordered newest first', _rows[0]['id'] > _rows[-1]['id'], True)
+
+# Delete
+_client.delete('/api/trades/1')
+check('Delete removes trade', len(_client.get('/api/trades').get_json()), 2)
+
+# Clear
+_client.post('/api/trades/clear')
+check('Clear empties trades', _client.get('/api/trades').get_json(), [])
+
+# Settings survive trade clear (separate table)
+check('Settings survive trade clear', _client.get('/api/settings').get_json()['account'], '25000')
+
+_os.unlink(app.DB_PATH)
+app.DB_PATH = _orig_db
+print('  (storage tested against temp DB, cleaned up)')
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:
