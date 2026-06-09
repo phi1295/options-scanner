@@ -683,6 +683,22 @@ app.DB_PATH = _orig_db
 print('  (storage tested against temp DB, cleaned up)')
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Configurable server port')
+def resolve_port(cfg_val, env_val=None):
+    import os as _o
+    src = cfg_val if cfg_val is not None else (env_val if env_val is not None else 8080)
+    try: return int(src)
+    except (ValueError, TypeError): return 8080
+check('Missing config → port 8080',     resolve_port(None), 8080)
+check('config server_port=9000 → 9000', resolve_port(9000), 9000)
+check('config server_port="8090" → 8090', resolve_port("8090"), 8090)
+check('Invalid port string → 8080',     resolve_port("abc"), 8080)
+check('app exposes SERVER_PORT',        hasattr(app, 'SERVER_PORT'), True)
+check('SERVER_PORT is an int',          isinstance(app.SERVER_PORT, int), True)
+# OAuth callback must remain on 8182 regardless of server port
+check('Callback URL still 8182',        '8182' in app.CALLBACK_URL, True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:

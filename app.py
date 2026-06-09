@@ -27,6 +27,14 @@ SCHWAB_SECRET = _config.get('schwab_client_secret', os.environ.get('SCHWAB_APP_S
 CALLBACK_URL  = 'https://127.0.0.1:8182'
 TOKEN_PATH    = str(pathlib.Path(__file__).parent / 'schwab_token.json')
 
+# Port the web server listens on. Set "server_port" in config.json to change it.
+# (This is separate from the Schwab OAuth callback port 8182, which is fixed
+#  and registered in your Schwab Developer Portal — do not change that.)
+try:
+    SERVER_PORT = int(_config.get('server_port', os.environ.get('SCANNER_PORT', 8080)))
+except (ValueError, TypeError):
+    SERVER_PORT = 8080
+
 # ── SQLite storage (single portable file: scanner.db) ─────────────────────────
 # This file holds trades + settings, shared across all clients (Mac, phone).
 # To move to another machine, just copy scanner.db — it's fully self-contained.
@@ -1944,7 +1952,7 @@ def refresh_universe_route():
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 def open_browser():
-    time.sleep(1.5); webbrowser.open('http://127.0.0.1:8080')
+    time.sleep(1.5); webbrowser.open(f'http://127.0.0.1:{SERVER_PORT}')
 
 if __name__=='__main__':
     print('\n'+'='*58)
@@ -1976,6 +1984,6 @@ if __name__=='__main__':
     init_schwab()  # loads token if available, sets _auth_pending if not
 
     # ── Start Flask ───────────────────────────────────────────────────────
-    print(f'\n  Starting scanner at http://127.0.0.1:8080 …\n')
+    print(f'\n  Starting scanner at http://127.0.0.1:{SERVER_PORT} …\n')
     threading.Thread(target=open_browser, daemon=True).start()
-    app.run(debug=False, host='0.0.0.0', port=8080, threaded=True)
+    app.run(debug=False, host='0.0.0.0', port=SERVER_PORT, threaded=True)
