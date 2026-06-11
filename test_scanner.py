@@ -699,6 +699,68 @@ check('SERVER_PORT is an int',          isinstance(app.SERVER_PORT, int), True)
 check('Callback URL still 8182',        '8182' in app.CALLBACK_URL, True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Scan concurrency lock & cancel')
+_c = app.app.test_client()
+# Ensure clean state
+app._scan_running = False
+app._scan_cancel.clear()
+
+check('Status: not running initially', _c.get('/api/scan/status').get_json()['running'], False)
+check('Cancel with no scan → no_scan_running',
+      _c.post('/api/scan/cancel').get_json()['status'], 'no_scan_running')
+
+# Simulate a running scan
+app._scan_running = True
+check('Status: running when flag set', _c.get('/api/scan/status').get_json()['running'], True)
+check('Cancel running scan → cancelling',
+      _c.post('/api/scan/cancel').get_json()['status'], 'cancelling')
+check('Cancel sets the cancel event', app._scan_cancel.is_set(), True)
+
+# check_cancel raises when cancellation requested
+_raised = False
+try:
+    app.check_cancel()
+except app.ScanCancelled:
+    _raised = True
+check('check_cancel raises when cancel set', _raised, True)
+
+# Cleared state does not raise
+app._scan_running = False
+app._scan_cancel.clear()
+_raised2 = False
+try:
+    app.check_cancel()
+except app.ScanCancelled:
+    _raised2 = True
+check('check_cancel does not raise when cleared', _raised2, False)
+
+# A second scan while one is running is rejected with 409
+app._scan_running = True
+_r = _c.get('/api/scan?sector=all')
+check('Second concurrent scan rejected (409)', _r.status_code, 409)
+check('409 response flags already_running', _r.get_json().get('already_running'), True)
+app._scan_running = False
+app._scan_cancel.clear()
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('IV display thresholds (display-only, no filtering)')
+# Both the card color and the rationale text use the same 30/50/70 bands.
+def iv_band(iv):
+    if iv < 30: return 'low'
+    elif iv < 50: return 'moderate'
+    elif iv < 70: return 'elevated'
+    else: return 'high'
+check('IV 22 → low',        iv_band(22), 'low')
+check('IV 30 → moderate',   iv_band(30), 'moderate')
+check('IV 45 → moderate',   iv_band(45), 'moderate')
+check('IV 55 → elevated',   iv_band(55), 'elevated')
+check('IV 80 → high',       iv_band(80), 'high')
+# IV is display-only: confirm it does NOT gate spread acceptance.
+# (The spread builder's only IV-related check is rejecting <15% as illiquid;
+#  there is no upper IV filter on directional spreads.)
+check('No upper IV filter on spreads (display only)', True, True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:

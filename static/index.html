@@ -100,6 +100,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .filter-input:focus,.filter-select:focus{outline:none;border-color:var(--green)}
 .btn-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:24px}
 .scan-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:var(--green);color:#071a10;border:none;border-radius:var(--r);font-size:14px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s}
+.scan-btn.cancel-mode{background:var(--red);color:#fff}
 .scan-btn:hover{opacity:.88}.scan-btn:disabled{opacity:.35;cursor:not-allowed}
 .regime-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:none;color:var(--text2);border:1px solid var(--border2);border-radius:var(--r);font-size:14px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s}
 .regime-btn:hover{color:var(--text);background:var(--bg2)}.regime-btn:disabled{opacity:.35;cursor:not-allowed}
@@ -1181,13 +1182,31 @@ async function loadSizing() {
   if (echo) echo.textContent = risk;
 }
 
+let _scanInProgress = false;
+
+async function cancelScan() {
+  try {
+    await fetch('/api/scan/cancel', {method: 'POST'});
+    const main = document.getElementById('progressMain');
+    if (main) main.innerHTML = '<span class="spinner"></span>Cancelling…';
+  } catch(e) { /* ignore */ }
+}
+
 async function runScan() {
   const btn = document.getElementById('scanBtn');
   const out = document.getElementById('scanOutput');
   const sector = document.getElementById('sectorFilter').value;
   const account = parseFloat(document.getElementById('accountSize').value) || 10000;
   const riskPct = parseFloat(document.getElementById('riskPct').value) || 1.5;
-  btn.disabled = true;
+
+  // Guard: if a scan is already running (this tab or another device), don't start a second
+  if (_scanInProgress) return;
+
+  _scanInProgress = true;
+  // Turn the Scan button into a Cancel button while running
+  btn.textContent = 'Cancel scan';
+  btn.classList.add('cancel-mode');
+  btn.onclick = cancelScan;
   _detailOpen = false;
 
   // Show progress panel
@@ -1204,6 +1223,14 @@ async function runScan() {
         <div class="progress-log" id="progressLog"></div>
       </div>
     </div>`;
+
+  function endScan() {
+    _scanInProgress = false;
+    btn.textContent = 'Run scan';
+    btn.classList.remove('cancel-mode');
+    btn.onclick = runScan;
+    btn.disabled = false;
+  }
 
   // Start SSE progress stream
   let sse = null;
@@ -1235,7 +1262,17 @@ async function runScan() {
     const r = await fetch(`/api/scan?sector=${encodeURIComponent(sector)}&account=${account}&risk_pct=${riskPct}`);
     const d = await r.json();
     if (sse) { sse.close(); sse = null; }
-    if (d.error) { out.innerHTML = `<div class="error-box">${d.error}</div>`; btn.disabled=false; return; }
+    if (r.status === 409 || d.already_running) {
+      out.innerHTML = `<div class="error-box">A scan is already running (possibly on another device). Wait for it to finish, or cancel it, before starting another.</div>`;
+      endScan();
+      return;
+    }
+    if (d.cancelled) {
+      out.innerHTML = `<div class="error-box">Scan cancelled.</div>`;
+      endScan();
+      return;
+    }
+    if (d.error) { out.innerHTML = `<div class="error-box">${d.error}</div>`; endScan(); return; }
     if (d.regime) renderRegime(d.regime);
     if (d.universe_meta) {
       const m = d.universe_meta; const ub = document.getElementById('universeBadge');
@@ -1252,7 +1289,7 @@ async function runScan() {
     if (sse) { sse.close(); sse = null; }
     out.innerHTML = `<div class="error-box">${e.message}</div>`;
   }
-  btn.disabled = false;
+  endScan();
 }
 
 // ── Rating helpers ─────────────────────────────────────────────────
@@ -1361,12 +1398,26 @@ function renderTrades(data) {
     const recRisk = t.rec_dollar_risk || 0;
     const recPct = t.rec_pct_of_account || 0;
     const recDebit = t.rec_total_debit || 0;
+    // IV context for debit spreads: lower IV = buying cheaper (good),
+    // elevated IV = paying up + exposed to IV contraction. Display only.
+    let ivCell = '';
+    if (t.iv !== '—' && t.iv != null) {
+      const ivv = parseFloat(t.iv);
+      let ivColor = 'var(--text)', ivLabel = '';
+      if (!isNaN(ivv)) {
+        if (ivv < 30)      { ivColor = 'var(--green)'; ivLabel = 'low'; }
+        else if (ivv < 50) { ivColor = 'var(--text)';  ivLabel = 'moderate'; }
+        else if (ivv < 70) { ivColor = 'var(--amber)'; ivLabel = 'elevated'; }
+        else               { ivColor = 'var(--red)';   ivLabel = 'high'; }
+      }
+      ivCell = `<div class="pos-item">IV<span style="color:${ivColor}">${t.iv}% ${ivLabel ? '· '+ivLabel : ''}</span></div>`;
+    }
     html += `<div class="pos-row">
       <div class="pos-item">Recommended<span style="color:var(--green)">${recC} contract${recC>1?'s':''}</span></div>
       <div class="pos-item">Risk at stop<span style="color:var(--red)">$${recRisk.toFixed(0)} (${recPct.toFixed(1)}%)</span></div>
       <div class="pos-item">Total debit<span>$${recDebit.toFixed(0)}</span></div>
       <div class="pos-item">Open interest<span>${t.open_interest}</span></div>
-      ${t.iv !== '—' ? `<div class="pos-item">IV<span>${t.iv}%</span></div>` : ''}
+      ${ivCell}
     </div>`;
     if (t.rec_warning) {
       html += `<div class="rec-warning">⚠ ${t.rec_warning}</div>`;
@@ -1857,6 +1908,26 @@ applyTheme();                       // theme is local (per-device)
   await loadSizing();               // account size + risk % from server
   await loadTrades();               // trade log from server
   renderLog();                      // render with the loaded data
+})();
+
+// If a scan is already running (e.g. started on another device or before a
+// reconnect), reflect that so we don't start a second one.
+(async () => {
+  try {
+    const r = await fetch('/api/scan/status');
+    const d = await r.json();
+    if (d.running) {
+      _scanInProgress = true;
+      const btn = document.getElementById('scanBtn');
+      if (btn) {
+        btn.textContent = 'Cancel scan';
+        btn.classList.add('cancel-mode');
+        btn.onclick = cancelScan;
+      }
+      const out = document.getElementById('scanOutput');
+      if (out) out.innerHTML = '<div class="error-box">A scan is already running (started elsewhere or before reconnect). You can cancel it with the button above.</div>';
+    }
+  } catch(e) { /* ignore */ }
 })();
 
 // Check auth first, then status

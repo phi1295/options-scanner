@@ -111,8 +111,22 @@ python3 app.py
 #    (Ctrl+C to stop. This shows errors the service might swallow.)
 ```
 
-### "could not locate runnable browser" (Schwab auth)
+### "UnicodeEncodeError: 'latin-1' codec can't encode character"
 
+The service environment defaulted to latin-1 and choked on a Unicode character
+(em-dash, checkmark) in a log line. The app now forces UTF-8 internally, but if
+you ever see this, add these to the `[Service]` section of the unit file:
+```ini
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
+```
+Then:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart scanner.service
+```
+
+### "could not locate runnable browser" (Schwab auth)
 The Pi has no browser to open. Copy a working token from your Mac:
 ```bash
 # Run this FROM YOUR MAC:

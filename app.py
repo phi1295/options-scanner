@@ -7,6 +7,20 @@ Run: python app.py
 """
 
 import os, json, math, time, webbrowser, threading, csv, io, pathlib, re, sqlite3
+import sys
+
+# ── Force UTF-8 output ────────────────────────────────────────────────────────
+# Under systemd (and some other non-interactive environments) Python may default
+# stdout/stderr to latin-1, which crashes on the Unicode characters used in the
+# startup banner and progress prints (em-dash, ✓, etc.). Reconfigure to UTF-8 so
+# logging works identically whether run by hand or as a service.
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass  # older Python without reconfigure(); env var below is the fallback
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
 from datetime import datetime, timedelta, date
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
@@ -77,12 +91,29 @@ _TRADE_COLS = ['id','ticker','company','structure','expiration','entryDate',
 import queue as _queue
 _progress_queue = _queue.Queue(maxsize=200)
 
+# ── Scan concurrency control ─────────────────────────────────────────────────
+# Only one scan may run at a time. A second request is rejected rather than
+# starting a concurrent scan (which would double-hit the Schwab API and race
+# on the progress queue). _scan_cancel lets a running scan be stopped.
+_scan_lock    = threading.Lock()
+_scan_running = False
+_scan_cancel  = threading.Event()
+
 def emit(msg, detail=False):
     """Push a progress message. detail=True = shown only in expanded view."""
     try:
         _progress_queue.put_nowait({'msg': msg, 'detail': detail})
     except:
         pass  # queue full — drop message
+
+class ScanCancelled(Exception):
+    """Raised inside a scan when the user requests cancellation."""
+    pass
+
+def check_cancel():
+    """Call at safe points during a scan; raises if cancellation was requested."""
+    if _scan_cancel.is_set():
+        raise ScanCancelled()
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 class RateLimiter:
@@ -1229,8 +1260,13 @@ def build_rationale(stock, spread, regime):
         parts.append(f"RS proxy ~{rs}.")
 
     parts.append(f"10d momentum {stock['mom10']:+.1f}%.")
-    iv_str=f"IV {spread['iv']}% — {'elevated premium' if spread['iv']>30 else 'normal'}." if spread.get('iv') else ''
-    if iv_str: parts.append(iv_str)
+    if spread.get('iv'):
+        _iv = spread['iv']
+        if   _iv < 30: _ivdesc = 'low — buying relatively cheap'
+        elif _iv < 50: _ivdesc = 'moderate'
+        elif _iv < 70: _ivdesc = 'elevated — paying up, some IV-contraction risk'
+        else:          _ivdesc = 'high — rich premium, watch for IV contraction'
+        parts.append(f"IV {_iv}% ({_ivdesc}).")
     parts.append(f"${spread['entry']:.2f} debit targets ${spread['profit_target']:.2f} ({spread['return_on_debit']}% return).")
     if not ibd: parts.append("Verify IBD RS at ibd.com before entry.")
 
@@ -1477,8 +1513,25 @@ def api_progress():
 
 @app.route('/api/scan')
 def api_scan():
+    global _scan_running
+
+    # ── Concurrency guard FIRST: reject a second scan if one is running ──
+    # (Checked before the client guard so a duplicate is always rejected
+    #  consistently, regardless of connection state.)
+    with _scan_lock:
+        if _scan_running:
+            return jsonify({'error': 'A scan is already running. Wait for it to '
+                                     'finish or cancel it before starting another.',
+                            'already_running': True}), 409
+        _scan_running = True
+        _scan_cancel.clear()
+
+    # Now validate the client; release the lock if we can't proceed.
     client=get_client()
-    if not client: return jsonify({'error':'Schwab not configured. Check config.json.'}),400
+    if not client:
+        _scan_running = False
+        return jsonify({'error':'Schwab not configured. Check config.json.'}),400
+
     sector_filter=request.args.get('sector','all').lower()
     # Position sizing inputs (from the Position Sizing panel)
     try:    account_size = float(request.args.get('account', 10000))
@@ -1528,6 +1581,7 @@ def api_scan():
         candidates=[]; screened=0; max_screen=60
         for symbol in pre_filtered:
             if screened >= max_screen: break
+            check_cancel()   # stop promptly if user cancelled
             if screened % 10 == 0:
                 print(f'  Screening {screened}/{max_screen}: {symbol}…')
                 emit(f'Screening stocks… {screened}/{max_screen}')
@@ -1562,6 +1616,7 @@ def api_scan():
         score_floor = 88 if regime == 'caution' else 0
 
         for stock in candidates[:20]:
+            check_cancel()   # stop promptly if user cancelled
             sym=stock['symbol']
             if stock['score'] < score_floor:
                 print(f'  Skipping {sym} — score {stock["score"]} below caution floor {score_floor}')
@@ -1640,9 +1695,30 @@ def api_scan():
             'market_status':mkt,'universe_meta':universe_meta,
             'screened':screened,'candidates_found':len(candidates),
         })
+    except ScanCancelled:
+        emit('Scan cancelled')
+        return jsonify({'error': 'Scan cancelled', 'cancelled': True}), 499
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error':str(e)}),500
+    finally:
+        # Always release the scan lock so the next scan can run
+        _scan_running = False
+        _scan_cancel.clear()
+
+@app.route('/api/scan/cancel', methods=['POST'])
+def api_scan_cancel():
+    """Request cancellation of the running scan (if any)."""
+    if _scan_running:
+        _scan_cancel.set()
+        emit('Cancelling scan…')
+        return jsonify({'status': 'cancelling'})
+    return jsonify({'status': 'no_scan_running'})
+
+@app.route('/api/scan/status')
+def api_scan_status():
+    """Report whether a scan is currently running (for reconnecting clients)."""
+    return jsonify({'running': _scan_running})
 
 # ── IBD50 import endpoints ────────────────────────────────────────────────────
 @app.route('/api/ibd50',methods=['GET'])
