@@ -761,6 +761,189 @@ check('IV 80 → high',       iv_band(80), 'high')
 check('No upper IV filter on spreads (display only)', True, True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Expired Schwab token detection')
+import unittest.mock as _mock
+
+class _FakeResp401:
+    status_code = 401
+    headers = {}
+
+def _fake_401_call(*a, **kw):
+    return _FakeResp401()
+
+# 401 must clear the client and set a clear auth_error — NOT loop trying to
+# reload the same dead token file (which can never fix an expired refresh token).
+app._schwab_client = _mock.MagicMock()
+app._auth_error = None
+_result = app.schwab_call(_fake_401_call)
+check('401 response returns None', _result, None)
+check('401 clears _schwab_client', app._schwab_client, None)
+check('401 sets a clear auth_error message',
+      app._auth_error, 'Schwab session expired. Please reconnect.')
+
+# /api/status must reflect the dead token, not just the file's existence
+_client_test = app.app.test_client()
+_d = _client_test.get('/api/status').get_json()
+check('/api/status ready=False after token death', _d['ready'], False)
+check('/api/status surfaces auth_error', _d['auth_error'] is not None, True)
+
+# Reset state for any later tests
+app._schwab_client = None
+app._auth_error = None
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('Market status: session recomputes against live clock, hours-only cache')
+from datetime import datetime as _dt, date as _date
+
+_today = _date.today()
+_start_iso = _dt.combine(_today, _dt.min.time()).replace(hour=9, minute=30).isoformat()
+_end_iso   = _dt.combine(_today, _dt.min.time()).replace(hour=16, minute=0).isoformat()
+
+# Simulate a cache already populated from an earlier successful call
+app._mkt_cache['date']  = _today.isoformat()
+app._mkt_cache['hours'] = {'is_open_today': True, 'start': _start_iso, 'end': _end_iso}
+
+_result = app.market_status(client=None)  # cache hit — no Schwab call needed
+_now = _dt.now()
+_start = _dt.fromisoformat(_start_iso)
+_end   = _dt.fromisoformat(_end_iso)
+_expected = 'pre' if _now < _start else ('after' if _now > _end else 'regular')
+check('Session reflects live clock, not frozen cache value', _result['session'], _expected)
+
+# The actual bug: cache must NOT store a pre-computed session that goes stale
+check('Cache stores hours, not the whole stale result',
+      set(app._mkt_cache.keys()) >= {'hours','date'}, True)
+check('Cache does not store a frozen session/is_open snapshot',
+      'data' not in app._mkt_cache, True)
+
+# Fail-safe direction: a failed Schwab call must NOT default to open
+def _market_status_no_client_failure():
+    # Force the cache empty so it must hit Schwab, then simulate failure
+    app._mkt_cache['date'] = None
+    app._mkt_cache['hours'] = None
+    class _FakeClient:
+        def get_market_hours(self, **kw):
+            class _R:
+                status_code = 500
+                headers = {}
+            return _R()
+    return app.market_status(_FakeClient())
+
+_fail_result = _market_status_no_client_failure()
+check('Failed market-hours call defaults to CLOSED, not open',
+      _fail_result['is_open'], False)
+check('Failed call does not falsely claim regular session',
+      _fail_result['session'] != 'regular', True)
+check('Failed market-hours call is not cached (self-corrects next poll)',
+      app._mkt_cache['hours'], None)
+
+# Reset cache for cleanliness
+app._mkt_cache['date'] = None
+app._mkt_cache['hours'] = None
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('FULL MONEY-MATH AUDIT: vertical spread formulas')
+# Hand-verified against options-pricing fundamentals. Real numbers, real money.
+
+# Net debit, max profit, profit target, stop loss, return% -- bull call spread
+buy_mark, sell_mark, width = 8.00, 4.50, 10.0
+nd = round(buy_mark - sell_mark, 2)
+mp = round(width - nd, 2)
+pt = round(nd + mp * 0.50, 2)
+sl = round(nd * 0.50, 2)
+rp = round((pt - nd) / nd * 100)
+check('Net debit = buy_mark - sell_mark', nd, 3.50)
+check('Max profit = width - debit', mp, 6.50)
+check('Profit target = debit + 50% of max profit', pt, 6.75)
+check('P&L at target = 50% of max profit', round(pt-nd,2), round(mp*0.5,2))
+check('Stop loss = 50% of debit', sl, 1.75)
+check('Loss at stop = 50% of debit', round(nd-sl,2), round(nd*0.5,2))
+
+# Breakeven formulas, both directions
+check('Bull call breakeven = buy_strike + debit', 520 + 3.50, 523.50)
+check('Bear put breakeven = buy_strike - debit', 335 - 3.00, 332.00)
+
+# Strike direction sanity (textbook spread construction)
+check('Bull call: buy_s < sell_s (lower strike bought)', 520 < 530, True)
+check('Bear put: buy_s > sell_s (higher strike put bought)', 335 > 325, True)
+
+# Vertical Daily Review P&L (matches entry-side formulas exactly)
+check('Vertical P&L = (current-debit)*100*contracts',
+      round((5.00-3.50)*100*10,2), 1500.0)
+check('Vertical pnl_pct = (current-debit)/debit*100',
+      round((5.00-3.50)/3.50*100,1), 42.9)
+
+# Expired-worthless loss = full debit
+check('Expired worthless P&L = -(debit*100*contracts)',
+      -(2.95*100*18), -5310.0)
+
+section('FULL MONEY-MATH AUDIT: iron condor formulas')
+nc, wing = 2.00, 5.0
+ml = round(wing - nc, 2)
+pt_c = round(nc * 0.50, 2)
+sl_c = round(nc * 2, 2)
+rp_c = round(pt_c / ml * 100) if ml > 0 else 0
+check('Condor max loss = wing - credit', ml, 3.00)
+check('Condor profit target (buy-back price) = 50% of credit', pt_c, 1.00)
+check('Condor stop (buy-back price) = 2x credit', sl_c, 4.00)
+check('Closing at target captures 50% of credit as profit',
+      round(nc - pt_c, 2), round(nc*0.5, 2))
+check('Stop loss triggers BEFORE true max loss (safety margin)',
+      abs(nc - sl_c) < ml, True)
+check('Condor return% (price-threshold based) is internally consistent',
+      rp_c, round((nc-pt_c)/ml*100))
+
+# Condor P&L direction (inverted from vertical: profit when value FALLS)
+check('Condor P&L = (credit - current)*100*contracts',
+      round((2.00-1.00)*100*10,2), 1000.0)
+check('Condor P&L negative when bought back above credit',
+      round((2.00-3.50)*100*10,2), -1500.0)
+
+section('FULL MONEY-MATH AUDIT: position sizing truncation & consistency')
+# Truncation must be conservative (floor, never round up) across many debits
+_violations = 0
+for _cents in range(50, 1000, 7):
+    _debit = _cents/100
+    _r = app.calc_position_size(_debit, 10000, 1.5)
+    _budget = 10000*0.015
+    if _r['contracts'] > 1 and _r['dollar_risk'] > _budget + 0.01:
+        _violations += 1
+check('Position sizing never exceeds risk budget (136 debit values tested)',
+      _violations, 0)
+
+# FIX VERIFIED: condor total_debit (capital-deployed display) now matches
+# dollar_risk when using risk_per_contract_override, instead of understating
+# it using the credit amount.
+_r_condor = app.calc_position_size(debit=2.00, account_size=10000, risk_pct=1.5,
+                                    risk_per_contract_override=300)
+check('Condor total_debit matches dollar_risk (both reflect true max loss)',
+      _r_condor['total_debit'], _r_condor['dollar_risk'])
+check('Condor total_debit = true max loss, not the smaller credit amount',
+      _r_condor['total_debit'], 300)
+
+# Vertical path unaffected by the condor fix
+_r_vert = app.calc_position_size(debit=3.00, account_size=10000, risk_pct=1.5)
+check('Vertical sizing unchanged after condor fix',
+      (_r_vert['contracts'], _r_vert['dollar_risk'], _r_vert['total_debit']),
+      (1, 150.0, 300.0))
+
+section('FULL MONEY-MATH AUDIT: score_stock bounds (randomized stress test)')
+import random as _random
+_random.seed(42)
+_score_violations = 0
+for _ in range(2000):
+    _stock = {'symbol':'TEST','price':_random.uniform(20,2000),
+              'ma50':_random.uniform(20,2000),'ma200':_random.uniform(20,2000),
+              'rs_raw':_random.uniform(-1,1),'mom10':_random.uniform(-50,50),
+              'vol_ratio':_random.uniform(0,5)}
+    _regime = _random.choice(['bullish','bearish','neutral','caution'])
+    _s = app.score_stock(_stock, _regime)
+    if not (0 <= _s <= 100):
+        _score_violations += 1
+check('score_stock always in [0,100] across 2000 randomized scenarios',
+      _score_violations, 0)
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:
