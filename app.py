@@ -477,7 +477,17 @@ def _compute_session(hours):
     try:
         start = datetime.fromisoformat(hours['start'])
         end   = datetime.fromisoformat(hours['end'])
-        now   = datetime.now()
+        # Schwab's timestamps are timezone-aware (carry a UTC offset, e.g.
+        # "...-04:00"). datetime.now() is naive (no timezone) and Python
+        # raises TypeError comparing naive vs aware — this was the actual
+        # cause of the "time parse issue" message (fromisoformat itself
+        # succeeds; it's the later < / > comparison that fails). Fix: make
+        # `now` aware in the SAME timezone as the parsed Schwab timestamps,
+        # rather than comparing across mismatched timezone-awareness.
+        if start.tzinfo is not None:
+            now = datetime.now(start.tzinfo)
+        else:
+            now = datetime.now()
         if now < start:
             mins = int((start-now).seconds/60)
             return {'is_open': False, 'session': 'pre',
@@ -488,7 +498,8 @@ def _compute_session(hours):
         else:
             return {'is_open': True, 'session': 'regular',
                     'message': f'Live. Closes {end.strftime("%I:%M %p")}.'}
-    except Exception:
+    except Exception as e:
+        print(f'Market session compute error: {type(e).__name__}: {e}')
         return {'is_open': False, 'session': 'unknown',
                 'message': 'Market status from Schwab (time parse issue).'}
 
