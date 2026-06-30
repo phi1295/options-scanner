@@ -1027,6 +1027,7 @@ async function checkStatus() {
     const r = await fetch('/api/status'); const d = await r.json();
     const el = document.getElementById('credStatus');
     let html = d.ready ? '<span style="color:var(--green)">✓ Schwab connected</span>'
+      : d.has_credentials && d.auth_error ? `<span style="color:var(--amber)">⚠ Session expired — reconnect</span>`
       : d.has_credentials && !d.has_token ? '<span style="color:var(--amber)">⚠ Need to reconnect</span>'
       : '<span style="color:var(--red)">✗ Check config.json</span>';
     if (d.ibd50 && d.ibd50.count > 0) {

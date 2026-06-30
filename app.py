@@ -139,11 +139,16 @@ def schwab_call(fn, *args, retries=3, **kwargs):
                 wait = 61 if '429-005' in resp.headers.get('X-RateLimit-Violated','') else 31
                 print(f'Rate limit 429 — waiting {wait}s'); time.sleep(wait); continue
             if resp.status_code == 401:
-                print('Token expired — re-authenticating')
-                global _schwab_client; _schwab_client = None
-                init_schwab()
-                if _schwab_client: continue
-                return None  # auth failed
+                # The access token is invalid AND the refresh token behind it has
+                # likely expired too (refresh tokens last ~7 days). Re-loading the
+                # same token file can't fix this — it would just load the same
+                # dead token again. Clear the client and surface the failure so
+                # the UI shows "needs reconnect" instead of silently looping.
+                print('Token expired (401) — clearing client, user must reconnect')
+                global _schwab_client, _auth_error
+                _schwab_client = None
+                _auth_error = 'Schwab session expired. Please reconnect.'
+                return None
             if resp.status_code in (400, 404): return None
             print(f'API {resp.status_code} for {args[:1]}')
             if attempt < retries-1: time.sleep(2**attempt)
@@ -420,49 +425,72 @@ def is_bad_acc_dis(rating):
     return str(rating).strip() in ('D+','D','D-','E')
 
 # ── Market hours ──────────────────────────────────────────────────────────────
-_mkt_cache = {'data': None, 'date': None}
+_mkt_cache = {'hours': None, 'date': None}
 
 def market_status(client):
+    """
+    Returns the current market session (pre/regular/after/closed).
+
+    IMPORTANT: the market's hours for today don't change, but the CURRENT
+    SESSION does — it must be recomputed against the live clock on every
+    call. Caching the whole result (including session) was the bug: once
+    it computed "regular/open" at, say, 11am, it stayed cached as green
+    until midnight even after the market closed at 4pm. The fix caches
+    only the day's hours (the part that's genuinely stable) and always
+    re-evaluates now() vs those hours fresh.
+    """
     today = date.today().isoformat()
-    if _mkt_cache['date'] == today and _mkt_cache['data']:
-        return _mkt_cache['data']
+    if _mkt_cache['date'] == today and _mkt_cache.get('hours'):
+        return _compute_session(_mkt_cache['hours'])
     try:
         resp = schwab_call(client.get_market_hours,
                            markets=['option'],
                            date=date.today())
         if resp:
-            data    = resp.json()
-            eqo     = data.get('option', {}).get('EQO', {})
-            is_open = eqo.get('isOpen', False)
-            if not is_open:
-                result = {'is_open': False, 'session': 'closed',
-                          'message': 'Options market closed today.'}
-            else:
-                regular = eqo.get('sessionHours', {}).get('regularMarket', [{}])[0]
-                try:
-                    start = datetime.fromisoformat(regular.get('start',''))
-                    end   = datetime.fromisoformat(regular.get('end',''))
-                    now   = datetime.now()
-                    if now < start:
-                        mins = int((start-now).seconds/60)
-                        result = {'is_open':False,'session':'pre',
-                                  'message':f'Pre-market. Opens in ~{mins} min.'}
-                    elif now > end:
-                        result = {'is_open':False,'session':'after',
-                                  'message':'After-hours. Using end-of-day data.'}
-                    else:
-                        result = {'is_open':True,'session':'regular',
-                                  'message':f'Live. Closes {end.strftime("%I:%M %p")}.'}
-                except:
-                    result = {'is_open':is_open,'session':'regular' if is_open else 'closed',
-                              'message':'Market status from Schwab.'}
+            data = resp.json()
+            eqo  = data.get('option', {}).get('EQO', {})
+            is_open_today = eqo.get('isOpen', False)
+            regular = eqo.get('sessionHours', {}).get('regularMarket', [{}])[0] if is_open_today else {}
+            hours = {'is_open_today': is_open_today,
+                     'start': regular.get('start'), 'end': regular.get('end')}
+            # Cache only the day's hours — these are genuinely stable for
+            # the rest of the day. The session itself is always computed fresh.
+            _mkt_cache.update({'hours': hours, 'date': today})
+            return _compute_session(hours)
         else:
-            result = {'is_open':True,'session':'unknown',
-                      'message':'Could not verify market hours.'}
-        _mkt_cache.update({'data':result,'date':today})
-        return result
-    except Exception as e:
-        return {'is_open':True,'session':'unknown','message':'Market hours unavailable.'}
+            # Schwab call failed (rate limit, network, etc). FAIL SAFE: assume
+            # closed/unknown rather than open — we genuinely don't know.
+            # NOT cached, so the next poll (e.g. 60s later) tries again fresh.
+            return {'is_open': False, 'session': 'unknown',
+                    'message': 'Could not verify market hours — assuming closed until confirmed.'}
+    except Exception:
+        # Same fail-safe direction on a hard exception. Not cached, so a
+        # transient error self-corrects on the next poll.
+        return {'is_open': False, 'session': 'unknown',
+                'message': 'Market hours unavailable — assuming closed until confirmed.'}
+
+def _compute_session(hours):
+    """Compute the CURRENT session against the live clock from cached day-hours."""
+    if not hours.get('is_open_today'):
+        return {'is_open': False, 'session': 'closed',
+                'message': 'Options market closed today.'}
+    try:
+        start = datetime.fromisoformat(hours['start'])
+        end   = datetime.fromisoformat(hours['end'])
+        now   = datetime.now()
+        if now < start:
+            mins = int((start-now).seconds/60)
+            return {'is_open': False, 'session': 'pre',
+                    'message': f'Pre-market. Opens in ~{mins} min.'}
+        elif now > end:
+            return {'is_open': False, 'session': 'after',
+                    'message': 'After-hours. Using end-of-day data.'}
+        else:
+            return {'is_open': True, 'session': 'regular',
+                    'message': f'Live. Closes {end.strftime("%I:%M %p")}.'}
+    except Exception:
+        return {'is_open': False, 'session': 'unknown',
+                'message': 'Market status from Schwab (time parse issue).'}
 
 # ── Universe ──────────────────────────────────────────────────────────────────
 _universe_cache = {'symbols':[],'timestamp':None}
@@ -849,7 +877,7 @@ def get_best_spread(client, symbol, price, regime):
     - Use mark (mid) prices throughout for realistic fills
     - OI filter: both legs need OI >= 10 (retail size)
     - Bid/ask filter: < 20% of mid (percentage, not absolute)
-    - Return filter: 20-45% return on debit
+    - Return filter: 25-50% return on debit (matches the enforced check below)
     - No delta filter — price proximity is more reliable given Schwab chain issues
     """
     try:
@@ -1183,9 +1211,17 @@ def calc_position_size(debit, account_size, risk_pct, max_debit_budget=10000,
 
     contracts = max(1, int(raw_contracts))   # floor, minimum 1
 
-    # Cap by total capital budget (use debit for verticals; for condors debit is
-    # the credit collected so capital deployed is better measured by risk)
-    per_contract_capital = (debit * 100) if debit > 0 else risk_per_contract
+    # Capital deployed per contract — what actually caps the budget and is
+    # shown as "Total debit" on the card. For verticals this is the debit
+    # paid. For condors (risk_per_contract_override given), the true capital
+    # at risk is the override (max loss), NOT the credit collected — using
+    # the credit here would understate risk and disagree with dollar_risk,
+    # which already correctly uses the override.
+    if risk_per_contract_override:
+        per_contract_capital = risk_per_contract_override
+    else:
+        per_contract_capital = debit * 100
+
     max_by_budget = int(max_debit_budget / per_contract_capital) if per_contract_capital > 0 else contracts
     if max_by_budget >= 1:
         contracts = min(contracts, max_by_budget)
@@ -1461,12 +1497,25 @@ def api_auth_disconnect():
 
 @app.route('/api/status')
 def api_status():
+    global _schwab_client
     has_creds = bool(SCHWAB_KEY and SCHWAB_SECRET)
-    # Source of truth for "connected" is the live client object, not just the file
-    connected = _schwab_client is not None
     has_token = pathlib.Path(TOKEN_PATH).exists()
     config_ok = _config_path.exists() and 'YOUR_CLIENT_ID' not in _config.get('schwab_client_id','YOUR_CLIENT_ID')
     client = _schwab_client
+
+    # Proactively verify the token still works, independent of the daily
+    # market-hours cache. Without this, a token that dies mid-session would
+    # keep showing "connected" until the cache naturally expired at midnight,
+    # because market_status() only hits Schwab once per day when cached.
+    if client:
+        check = schwab_call(client.get_quotes, ['SPY'])
+        if check is None and _schwab_client is None:
+            # schwab_call's 401 handler already cleared _schwab_client — the
+            # token is confirmed dead. Fall through with client=None below.
+            client = None
+
+    # Source of truth for "connected" is the live client object, not just the file
+    connected = client is not None
     mkt = market_status(client) if client else {'is_open':False,'session':'unknown','message':'Connect Schwab to check market hours.'}
     ibd_summary = {}
     if _ibd50_data:
@@ -1475,7 +1524,7 @@ def api_status():
                        'avg_rs':round(sum(rs_vals)/len(rs_vals),1) if rs_vals else None,
                        'updated':json.load(open(IBD50_PATH)).get('updated','') if IBD50_PATH.exists() else ''}
     return jsonify({'has_credentials':has_creds,'has_token':has_token,'config_file':config_ok,
-                    'ready':connected,'market':mkt,
+                    'ready':connected,'market':mkt,'auth_error':_auth_error,
                     'ibd50':ibd_summary,'universe_count':len(_universe_cache['symbols'])})
 
 @app.route('/api/regime')

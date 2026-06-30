@@ -126,8 +126,27 @@ sudo systemctl daemon-reload
 sudo systemctl restart scanner.service
 ```
 
-### "could not locate runnable browser" (Schwab auth)
-The Pi has no browser to open. Copy a working token from your Mac:
+### "could not locate runnable browser" (Schwab auth) — or VNC browser won't open
+The Pi can't auto-open a browser (headless, SSH, or VNC). Use the manual auth
+script — it needs no auto-browser:
+```bash
+cd ~/options-scanner
+source .venv/bin/activate
+python3 authenticate.py
+```
+It prints a URL — open it in any browser, log in, paste the redirect URL back,
+then: `sudo systemctl restart scanner.service`
+
+**Tip: if Chromium fails Schwab's login page, use Firefox instead.**
+Chromium on ARM Linux can have JavaScript issues with Schwab's auth flow.
+Install Firefox and set it as default:
+```bash
+sudo apt install -y firefox-esr
+```
+Then set it as the default browser in the Pi desktop settings, or just
+open the URL manually in Firefox.
+
+Or copy a working token from your Mac:
 ```bash
 # Run this FROM YOUR MAC:
 scp ~/PycharmProjects/options-scanner/schwab_token.json pi@<pi-ip>:~/options-scanner/

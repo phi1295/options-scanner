@@ -109,14 +109,32 @@ Then on the Pi's own browser:
    (Advanced → Proceed)
 5. Wait for "Schwab connected" — the token saves to `schwab_token.json`
 
-**Headless Pi (no monitor)?** Easiest is to do the Schwab auth once on your
-Mac (you already have a working `schwab_token.json`), then copy that token to
-the Pi:
+**Headless Pi (no monitor) or VNC where the browser won't open?**
+
+You have two reliable options:
+
+**Option A — Manual auth script (works over VNC/SSH, no auto-browser needed):**
+```bash
+cd ~/options-scanner
+source .venv/bin/activate
+python3 authenticate.py
+```
+It prints a Schwab URL. Open that URL in ANY browser (the Pi's, your phone, your
+Mac), log in, approve. Your browser redirects to a `127.0.0.1:8182` address that
+won't load a real page (and may show a certificate warning) — that's fine. Copy
+the FULL address-bar URL (it contains `code=...`) and paste it back into the
+script when prompted. It writes `schwab_token.json`, then:
+```bash
+sudo systemctl restart scanner.service
+```
+
+**Option B — Copy a token from your Mac.** Authenticate on the Mac (its browser
+opens normally), then copy the token over:
 ```bash
 scp /Users/erikbeltran/PycharmProjects/options-scanner/schwab_token.json pi@192.168.1.50:~/options-scanner/
 ```
 The token works on the Pi as long as the same `config.json` credentials are
-present. Re-auth weekly the same way, or set up VNC for on-Pi login.
+present. Re-do either option weekly when the token expires.
 
 Once the token exists, the app starts straight into the scanner — no login
 screen — and you can reach it from any device.
@@ -159,6 +177,8 @@ Wants=network-online.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/options-scanner
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/pi/options-scanner/.venv/bin/python3 /home/pi/options-scanner/app.py
 Restart=on-failure
 RestartSec=5
