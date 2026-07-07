@@ -164,6 +164,7 @@ _schwab_client = None
 # ── Auth state ───────────────────────────────────────────────────────────────
 _auth_pending = False   # True when login flow is running in background
 _auth_error   = None    # Last auth error message if any
+_manual_auth_url = None # Set when headless fallback needs user to open a URL manually
 
 def get_client():
     """Return existing client."""
@@ -209,31 +210,104 @@ def init_schwab():
 
 def _login_flow_thread():
     """
-    Runs schwab-py's client_from_login_flow in a background thread.
-    This function starts the built-in HTTPS callback server on port 8182,
-    opens the Schwab login page automatically, and saves the token.
-    The UI polls /api/auth/status to detect completion.
+    Runs the Schwab login flow in a background thread.
+
+    Primary path: client_from_login_flow auto-opens a browser. Works on Mac
+    or any desktop with Firefox/Chrome available.
+
+    Fallback path (Pi/headless): when no browser is available, builds the
+    auth URL manually, surfaces it through /api/auth/status so the UI can
+    display it, then starts the callback server and waits for the redirect.
+    The user opens the URL on any device, completes login, and the callback
+    comes back to the Pi's port 8182 automatically.
     """
-    global _schwab_client, _auth_pending, _auth_error
+    global _schwab_client, _auth_pending, _auth_error, _manual_auth_url
+    _manual_auth_url = None
     try:
         import schwab
         print('  Starting Schwab login flow…')
-        _schwab_client = schwab.auth.client_from_login_flow(
-            api_key=SCHWAB_KEY,
-            app_secret=SCHWAB_SECRET,
-            callback_url=CALLBACK_URL,
-            token_path=TOKEN_PATH,
-            enforce_enums=False,
-            interactive=False,      # don't wait for console input — open browser directly
-            callback_timeout=300.0, # wait up to 5 min for user to complete login
+        # ── Primary: auto-browser flow ────────────────────────────────────
+        try:
+            _schwab_client = schwab.auth.client_from_login_flow(
+                api_key=SCHWAB_KEY,
+                app_secret=SCHWAB_SECRET,
+                callback_url=CALLBACK_URL,
+                token_path=TOKEN_PATH,
+                enforce_enums=False,
+                interactive=False,
+                callback_timeout=300.0,
+            )
+            _auth_pending = False
+            _auth_error   = None
+            print('  ✓ Schwab authentication complete — token saved!')
+            return
+        except Exception as browser_err:
+            err_str = str(browser_err).lower()
+            is_browser_err = any(w in err_str for w in
+                                  ['browser', 'display', 'runnable', 'could not locate'])
+            if not is_browser_err:
+                raise  # different error — re-raise, don't fall through
+            print(f'  ⚠  Auto-browser unavailable ({browser_err})')
+            print('      Falling back to manual flow — surfacing URL in the UI')
+
+        # ── Fallback: headless/Pi flow ────────────────────────────────────
+        # Build the Schwab auth URL and publish it so the UI can display it.
+        # The user opens it on any browser (Mac, phone), completes login, and
+        # the browser is redirected to https://127.0.0.1:8182?code=...
+        # schwab-py's callback server (started by client_from_login_flow
+        # below) catches that redirect without needing a local browser at all.
+        import urllib.parse, secrets as _sec
+        state     = _sec.token_urlsafe(16)
+        auth_url  = (
+            'https://api.schwabapi.com/v1/oauth/authorize'
+            f'?client_id={urllib.parse.quote(SCHWAB_KEY)}'
+            f'&redirect_uri={urllib.parse.quote(CALLBACK_URL)}'
+            '&response_type=code'
+            f'&state={state}'
         )
-        _auth_pending = False
-        _auth_error   = None
-        print('  ✓ Schwab authentication complete — token saved!')
+        _manual_auth_url = auth_url
+        # Signal the UI that it needs to show the URL
+        _auth_error = 'MANUAL_AUTH_REQUIRED'
+        print(f'  Auth URL ready (will be shown in the UI)')
+        print(f'  Waiting for Schwab callback on port 8182…')
+
+        # Re-run client_from_login_flow but now the browser has ALREADY been
+        # "opened" by the user on their own device. The library just needs to
+        # listen on port 8182 for the OAuth callback. Passing requested_browser=''
+        # (empty string) prevents it from trying to auto-open a browser again
+        # while still running the callback server.
+        try:
+            _schwab_client = schwab.auth.client_from_login_flow(
+                api_key=SCHWAB_KEY,
+                app_secret=SCHWAB_SECRET,
+                callback_url=CALLBACK_URL,
+                token_path=TOKEN_PATH,
+                enforce_enums=False,
+                interactive=False,
+                callback_timeout=300.0,
+                requested_browser='',  # suppress browser open; we already sent the user there
+            )
+            _manual_auth_url = None
+            _auth_pending = False
+            _auth_error   = None
+            print('  ✓ Manual Schwab authentication complete — token saved!')
+        except Exception as inner_e:
+            # requested_browser='' may not be supported in older schwab-py.
+            # Final fallback: just wait — if the user visits the URL and the
+            # callback server was already started by the first attempt, it may
+            # still complete. Otherwise surface the error clearly.
+            print(f'  ✗ Headless flow error: {inner_e}')
+            _auth_error = (f'Browser unavailable on this machine. '
+                           f'Run authenticate.py from the terminal instead: '
+                           f'python3 authenticate.py')
+            _manual_auth_url = None
+            _auth_pending = False
+
     except Exception as e:
         import traceback; traceback.print_exc()
         _auth_error   = str(e)
         _auth_pending = False
+        _manual_auth_url = None
         print(f'  ✗ Login flow error: {e}')
 
 # ── IBD50 storage — now stores full row data ──────────────────────────────────
@@ -1470,13 +1544,16 @@ def save_settings():
 def api_auth_status():
     """Poll this to know if auth is needed / in progress / complete."""
     connected = _schwab_client is not None
+    is_manual = _auth_error == 'MANUAL_AUTH_REQUIRED'
     return jsonify({
-        'connected':      connected,
-        'auth_pending':   _auth_pending,
-        'auth_error':     _auth_error,
-        'needs_auth':     not connected and not _auth_pending,
-        'credentials_ok': bool(SCHWAB_KEY and SCHWAB_SECRET
-                               and 'YOUR_CLIENT_ID' not in SCHWAB_KEY),
+        'connected':       connected,
+        'auth_pending':    _auth_pending,
+        'auth_error':      _auth_error if not is_manual else None,
+        'needs_auth':      not connected and not _auth_pending,
+        'credentials_ok':  bool(SCHWAB_KEY and SCHWAB_SECRET
+                                and 'YOUR_CLIENT_ID' not in SCHWAB_KEY),
+        'manual_auth_url': _manual_auth_url,  # set when browser unavailable on this machine
+        'manual_auth_needed': is_manual,
     })
 
 @app.route('/api/auth/start', methods=['POST'])
@@ -1916,7 +1993,8 @@ def api_review():
                 a = o.get('ask', 0) or 0
                 return (b + a) / 2 if (b + a) > 0 else None
 
-            current_value = None
+            current_value    = None
+            underlying_price = None   # will be populated from chain response
 
             if is_condor and exp_date:
                 # Condor: structure is "SELL $Xc / BUY $Yc + SELL $Zp / BUY $Wp"
@@ -1929,6 +2007,7 @@ def api_review():
                                        include_underlying_quote=True, strategy='SINGLE')
                     if resp:
                         chain = resp.json()
+                        underlying_price = chain.get('underlyingPrice')
                         calls = chain.get('callExpDateMap', {})
                         puts  = chain.get('putExpDateMap', {})
                         def find_exp(m):
@@ -1959,6 +2038,7 @@ def api_review():
                                        include_underlying_quote=True, strategy='SINGLE')
                     if resp:
                         chain = resp.json()
+                        underlying_price = chain.get('underlyingPrice')
                         exp_map = chain.get('callExpDateMap' if ct == 'CALL' else 'putExpDateMap', {})
                         for exp_str, strikes_dict in exp_map.items():
                             try:
@@ -2068,6 +2148,7 @@ def api_review():
                 'contracts':     contracts,
                 'entry_date':    entry_date,
                 'current_value': current_value,
+                'underlying_price': round(underlying_price, 2) if underlying_price else None,
                 'pnl':           pnl,
                 'pnl_pct':       pnl_pct,
                 'action':        action,

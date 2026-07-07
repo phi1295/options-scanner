@@ -29,6 +29,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .nav-item svg{width:15px;height:15px;flex-shrink:0}
 .nav-divider{height:1px;background:var(--border);margin:10px 12px}
 .sb-section{padding:12px;margin:0 10px 10px;background:var(--bg3);border-radius:var(--rs);border:1px solid var(--border)}
+.mobile-status-bar{display:none}
 .theme-toggle{display:flex;align-items:center;justify-content:center;gap:8px;width:calc(100% - 20px);margin:0 10px 10px;padding:9px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s}
 .theme-toggle:hover{color:var(--text);border-color:var(--border2)}
 .sb-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-family:'DM Mono',monospace;margin-bottom:6px}
@@ -261,6 +262,8 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .auth-connect-btn{width:100%;height:50px;background:var(--green);color:#071a10;border:none;border-radius:var(--r);font-size:15px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:10px}
 .auth-connect-btn:hover{opacity:.88}.auth-connect-btn:disabled{opacity:.4;cursor:not-allowed}
 .auth-status-msg{font-size:13px;color:var(--text2);min-height:20px;margin-bottom:16px}
+.manual-auth-url{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:10px 14px;font-family:'DM Mono',monospace;font-size:11px;word-break:break-all;color:var(--text);margin:8px 0;line-height:1.6}
+.manual-auth-copy{padding:7px 14px;background:var(--bd);border:1px solid rgba(96,165,250,.3);border-radius:var(--rs);color:var(--blue);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;margin-top:4px}
 .auth-status-msg.success{color:var(--green)}.auth-status-msg.error{color:var(--red)}.auth-status-msg.pending{color:var(--amber)}
 .auth-steps{background:var(--bg3);border-radius:var(--rs);padding:14px 18px;text-align:left;font-size:13px;color:var(--text2);line-height:2;margin-bottom:20px;display:none}
 .auth-steps.visible{display:block}
@@ -339,7 +342,10 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
     position: fixed; bottom: 64px; right: 10px; left: auto;
     width: auto; padding: 0; margin: 0; z-index: 101;
   }
-  .sidebar .sb-section { display: none; }   /* status hidden on mobile to save space */
+  .sidebar .sb-section { display: none; }   /* sidebar status hidden on mobile */
+  .mobile-status-bar { display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--rs); margin-bottom: 12px; font-size: 12px; }
   .theme-toggle {
     width: auto; margin: 0;
     padding: 7px 10px; font-size: 11px;
@@ -464,6 +470,9 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
   <main class="main">
     <!-- SCANNER -->
     <div id="page-scanner" class="page active">
+      <div class="mobile-status-bar" id="mobileStatusBar">
+        <span id="mobileCredStatus">Checking…</span>
+      </div>
       <div class="page-header">
         <div class="page-title">Options Scanner</div>
         <div class="page-desc">Live Schwab data + IBD50 multi-factor scoring. Regime-adaptive strategy selection. Earnings filtered automatically.</div>
@@ -926,13 +935,28 @@ async function checkAuthStatus() {
       return true;
     }
 
-    if (d.auth_pending) {
+    if (d.auth_pending || d.manual_auth_needed) {
       screen.classList.add('visible');
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
-      msg.className = 'auth-status-msg pending';
-      msg.textContent = 'Schwab login page should be open in your browser…';
       steps.classList.add('visible');
+
+      if (d.manual_auth_needed && d.manual_auth_url) {
+        // Pi/headless: browser couldn't auto-open. Show the URL so the
+        // user can open it on their Mac/phone and complete the login there.
+        // The Pi's callback server is listening — the redirect comes back
+        // automatically once they approve, with no browser needed on the Pi.
+        btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab callback…';
+        msg.className = 'auth-status-msg pending';
+        msg.innerHTML = `
+          <div style="margin-bottom:10px">No browser available on this device. Open this URL on your Mac or phone:</div>
+          <div class="manual-auth-url" id="manualAuthUrl">${d.manual_auth_url}</div>
+          <button class="manual-auth-copy" onclick="navigator.clipboard.writeText(document.getElementById('manualAuthUrl').textContent).then(()=>this.textContent='Copied!').catch(()=>{})">Copy URL</button>
+          <div style="margin-top:10px;font-size:12px;color:var(--text3)">Log in to Schwab, click Allow, then wait — this screen updates automatically when done.</div>`;
+      } else {
+        btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
+        msg.className = 'auth-status-msg pending';
+        msg.textContent = 'Schwab login page should be open in your browser…';
+      }
       if (!_authPolling) {
         _authPolling = true;
         pollAuthCompletion();
@@ -1041,6 +1065,15 @@ async function checkStatus() {
     // Add disconnect link if connected
     html += '<br><a href="#" onclick="disconnectSchwab();return false;" style="font-size:10px;color:var(--text3)">Disconnect</a>';
     el.innerHTML = html;
+    // Mirror Schwab connection status to the mobile-only bar on the Scanner page
+    const mob = document.getElementById('mobileCredStatus');
+    if (mob) mob.innerHTML = d.ready
+      ? '<span style="color:var(--green)">✓ Schwab connected</span>'
+      : d.has_credentials && d.auth_error
+        ? '<span style="color:var(--amber)">⚠ Session expired</span>'
+      : d.has_credentials && !d.has_token
+        ? '<span style="color:var(--amber)">⚠ Need to reconnect</span>'
+        : '<span style="color:var(--red)">✗ Check config.json</span>';
     if (d.market) {
       const bar = document.getElementById('mktBar');
       const cls = d.market.session === 'regular' ? 'open' : d.market.session === 'pre' ? 'warn' : 'closed';
@@ -1856,7 +1889,7 @@ function renderReview(data) {
     html += `<div class="review-card ${u}">
       <div class="review-header">
         <div>
-          <div class="review-ticker">${t.ticker}</div>
+          <div class="review-ticker">${t.ticker}${t.underlying_price ? `<span style="font-size:13px;font-weight:400;color:var(--text2);font-family:'DM Mono',monospace;margin-left:10px">$${t.underlying_price.toFixed(2)}</span>` : ''}</div>
           <div class="review-structure">${t.is_condor ? '🦅 ' : ''}${t.structure}</div>
           <div style="font-size:11px;color:var(--text2);margin-top:3px">Exp ${t.expiration} · ${t.dte !== null ? t.dte + ' DTE' : '—'} · ${t.contracts} contracts</div>
         </div>
