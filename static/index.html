@@ -110,6 +110,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .trade-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;margin-bottom:12px}
 .trade-card.top{border-color:rgba(45,212,160,.4)}.trade-card.top-bear{border-color:rgba(240,96,96,.4)}
 .top-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;border-radius:20px;margin-bottom:10px;font-family:'DM Mono',monospace}
+.seen-badge{display:inline-flex;align-items:center;font-size:11px;padding:3px 9px;border-radius:20px;margin-bottom:10px;margin-left:6px;font-family:'DM Mono',monospace;background:var(--bd);color:var(--blue);border:1px solid rgba(96,165,250,.25)}
 .top-badge.bull{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.25)}
 .top-badge.bear{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.25)}
 .top-badge.neut{background:var(--pd);color:var(--purple);border:1px solid rgba(167,139,250,.25)}
@@ -1357,6 +1358,7 @@ function renderTrades(data) {
     const isTop = t.top_pick;
     html += `<div class="trade-card ${isTop?(sc==='bear'?'top-bear':'top'):''}">`;
     if (isTop) html += `<div class="top-badge ${sc}">★ top pick</div>`;
+    if (t.seen_before) html += `<div class="seen-badge">↻ seen before</div>`;
     html += `<div class="card-header">
       <div>
         <div style="display:flex;align-items:baseline;gap:8px">

@@ -98,6 +98,7 @@ _progress_queue = _queue.Queue(maxsize=200)
 _scan_lock    = threading.Lock()
 _scan_running = False
 _scan_cancel  = threading.Event()
+_last_scan_tickers = set()   # tickers from the previous scan, for "seen before" flagging
 
 def emit(msg, detail=False):
     """Push a progress message. detail=True = shown only in expanded view."""
@@ -1651,6 +1652,7 @@ def api_progress():
 @app.route('/api/scan')
 def api_scan():
     global _scan_running
+    global _last_scan_tickers
 
     # ── Concurrency guard FIRST: reject a second scan if one is running ──
     # (Checked before the client guard so a duplicate is always rejected
@@ -1703,14 +1705,23 @@ def api_scan():
         emit(f'Universe ready: {len(pre_filtered)} stocks to screen')
 
         # ── Smart ordering: IBD50 first, then movers, then S&P500 ────────────
-        # This means the best candidates are screened first and we can stop early
+        # Within each tier, sort by IBD score descending so the same
+        # highest-scoring stocks are always processed first regardless of
+        # set/dict ordering non-determinism. This makes consecutive scans
+        # return the same top 8 as long as prices haven't moved significantly.
         ibd_set   = set(ibd50_symbols())
         mover_set = set(get_movers(client))
         def priority(sym):
             if sym in ibd_set:   return 0
             if sym in mover_set: return 1
             return 2
-        pre_filtered.sort(key=priority)
+        def sort_key(sym):
+            # Primary: tier (0=IBD50, 1=movers, 2=SP500)
+            # Secondary: IBD score descending (negate so higher score = earlier)
+            ibd = ibd50_get(sym)
+            score = ibd.get('rs_rating', 0) if ibd else 0
+            return (priority(sym), -score)
+        pre_filtered.sort(key=sort_key)
 
         # Screen at most 60 stocks — IBD50+movers first guarantees best picks
         # At 80 req/min: 60 price_history + 60 earnings = ~90s max
@@ -1788,6 +1799,7 @@ def api_scan():
                 'stock_price':round(stock['price'],2),
                 'setup_score':stock['score'],
                 'top_pick':False,
+                'seen_before': sym in _last_scan_tickers,
                 'strategy_type':strat_map.get(regime,'bull_call_spread'),
                 'tags':tags,
                 'expiration':spread['expiration'],'dte':spread['dte'],
@@ -1818,10 +1830,13 @@ def api_scan():
                 'rationale':build_rationale(stock,spread,regime),
                 'ibd_lookup':f'https://research.investors.com/stock-quotes/nasdaq-{sym.lower()}-{sym}.htm',
             })
-            if len(trades)>=5: break
+            if len(trades)>=8: break
 
         if not trades:
             return jsonify({'error':'Found candidates but no valid spreads. Markets may be closed.'})
+
+        # Update the "seen before" memory for the next scan
+        _last_scan_tickers = {t['ticker'] for t in trades}
 
         trades[0]['top_pick']=True
         emit(f'Scan complete — {len(trades)} trade setups ready')
