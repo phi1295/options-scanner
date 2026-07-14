@@ -62,7 +62,7 @@ if [ $? -ne 0 ]; then
     echo ""
 fi
 
-echo "  Starting scanner — browser will open at http://127.0.0.1:8080"
+echo "  Starting scanner — browser will open automatically"
 echo "════════════════════════════════════════════════════"
 echo ""
 

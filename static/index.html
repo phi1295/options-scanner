@@ -2,8 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Options Trade Scanner</title>
+<!-- PWA: installable as a home-screen app -->
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0e0f11">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TradeScan">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
@@ -22,6 +29,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .nav-item svg{width:15px;height:15px;flex-shrink:0}
 .nav-divider{height:1px;background:var(--border);margin:10px 12px}
 .sb-section{padding:12px;margin:0 10px 10px;background:var(--bg3);border-radius:var(--rs);border:1px solid var(--border)}
+.mobile-status-bar{display:none}
 .theme-toggle{display:flex;align-items:center;justify-content:center;gap:8px;width:calc(100% - 20px);margin:0 10px 10px;padding:9px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s}
 .theme-toggle:hover{color:var(--text);border-color:var(--border2)}
 .sb-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-family:'DM Mono',monospace;margin-bottom:6px}
@@ -93,6 +101,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .filter-input:focus,.filter-select:focus{outline:none;border-color:var(--green)}
 .btn-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:24px}
 .scan-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:var(--green);color:#071a10;border:none;border-radius:var(--r);font-size:14px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s}
+.scan-btn.cancel-mode{background:var(--red);color:#fff}
 .scan-btn:hover{opacity:.88}.scan-btn:disabled{opacity:.35;cursor:not-allowed}
 .regime-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;background:none;color:var(--text2);border:1px solid var(--border2);border-radius:var(--r);font-size:14px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .15s}
 .regime-btn:hover{color:var(--text);background:var(--bg2)}.regime-btn:disabled{opacity:.35;cursor:not-allowed}
@@ -101,6 +110,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .trade-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;margin-bottom:12px}
 .trade-card.top{border-color:rgba(45,212,160,.4)}.trade-card.top-bear{border-color:rgba(240,96,96,.4)}
 .top-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;border-radius:20px;margin-bottom:10px;font-family:'DM Mono',monospace}
+.seen-badge{display:inline-flex;align-items:center;font-size:11px;padding:3px 9px;border-radius:20px;margin-bottom:10px;margin-left:6px;font-family:'DM Mono',monospace;background:var(--bd);color:var(--blue);border:1px solid rgba(96,165,250,.25)}
 .top-badge.bull{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.25)}
 .top-badge.bear{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.25)}
 .top-badge.neut{background:var(--pd);color:var(--purple);border:1px solid rgba(167,139,250,.25)}
@@ -226,6 +236,8 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .edit-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:4px}.edit-btn:hover{color:var(--blue)}
 .add-manual-btn{padding:8px 14px;background:none;border:1px solid var(--border2);border-radius:var(--rs);color:var(--text2);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif}
 .add-manual-btn:hover{border-color:var(--green);color:var(--green)}
+.import-old-btn{padding:8px 14px;background:var(--ad);border:1px solid rgba(246,176,66,.4);border-radius:var(--rs);color:var(--amber);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif}
+.import-old-btn:hover{border-color:var(--amber);background:rgba(246,176,66,.18)}
 .exit-in{width:80px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:12px;font-family:'DM Mono',monospace}
 /* Modal */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;align-items:center;justify-content:center}
@@ -251,6 +263,8 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .auth-connect-btn{width:100%;height:50px;background:var(--green);color:#071a10;border:none;border-radius:var(--r);font-size:15px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:10px}
 .auth-connect-btn:hover{opacity:.88}.auth-connect-btn:disabled{opacity:.4;cursor:not-allowed}
 .auth-status-msg{font-size:13px;color:var(--text2);min-height:20px;margin-bottom:16px}
+.manual-auth-url{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:10px 14px;font-family:'DM Mono',monospace;font-size:11px;word-break:break-all;color:var(--text);margin:8px 0;line-height:1.6}
+.manual-auth-copy{padding:7px 14px;background:var(--bd);border:1px solid rgba(96,165,250,.3);border-radius:var(--rs);color:var(--blue);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;margin-top:4px}
 .auth-status-msg.success{color:var(--green)}.auth-status-msg.error{color:var(--red)}.auth-status-msg.pending{color:var(--amber)}
 .auth-steps{background:var(--bg3);border-radius:var(--rs);padding:14px 18px;text-align:left;font-size:13px;color:var(--text2);line-height:2;margin-bottom:20px;display:none}
 .auth-steps.visible{display:block}
@@ -294,6 +308,91 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .step-body code{font-family:'DM Mono',monospace;font-size:12px;background:var(--bg3);padding:2px 6px;border-radius:4px;color:var(--amber)}
 .code-block{background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px 16px;font-family:'DM Mono',monospace;font-size:12px;color:var(--amber);line-height:1.8;margin-top:8px;white-space:pre}
 .warn-box{background:var(--ad);border:1px solid rgba(246,176,66,.25);border-radius:var(--rs);padding:11px 14px;font-size:13px;color:#c9943a;line-height:1.65;margin-top:10px}
+
+/* ══ MOBILE / RESPONSIVE (≤768px) ══════════════════════════════════════════
+   Sidebar becomes a fixed bottom tab bar; content goes full-width and grids
+   collapse. Desktop layout above 768px is untouched. */
+@media (max-width: 768px) {
+  .shell { grid-template-columns: 1fr; }
+
+  /* Sidebar → fixed bottom tab bar */
+  .sidebar {
+    position: fixed; bottom: 0; left: 0; right: 0; top: auto;
+    height: auto; width: 100%; z-index: 100;
+    flex-direction: column; padding: 0;
+    border-right: none; border-top: 1px solid var(--border);
+    box-shadow: 0 -2px 12px rgba(0,0,0,.18);
+  }
+  .logo { display: none; }            /* hide big logo on mobile */
+  .nav {
+    display: flex; flex-direction: row; overflow-x: auto;
+    padding: 6px 4px; gap: 2px; -webkit-overflow-scrolling: touch;
+  }
+  .nav-item {
+    flex-direction: column; align-items: center; gap: 3px;
+    font-size: 10px; padding: 7px 10px; white-space: nowrap;
+    min-width: 62px; border-radius: var(--rs);
+  }
+  .nav-item svg { width: 20px; height: 20px; }
+  .nav-divider { display: none; }     /* no divider in horizontal bar */
+
+  /* The theme/status block lived at the bottom of the sidebar — move it
+     into a slim row above the tab bar, hidden to keep the bar clean.
+     Theme toggle stays reachable via its own compact button. */
+  .sidebar > div[style*="margin-top:auto"] {
+    position: fixed; bottom: 64px; right: 10px; left: auto;
+    width: auto; padding: 0; margin: 0; z-index: 101;
+  }
+  .sidebar .sb-section { display: none; }   /* sidebar status hidden on mobile */
+  .mobile-status-bar { display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--rs); margin-bottom: 12px; font-size: 12px; }
+  .theme-toggle {
+    width: auto; margin: 0;
+    padding: 7px 10px; font-size: 11px;
+    background: var(--bg2); border: 1px solid var(--border2);
+    border-radius: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.2);
+  }
+  .theme-toggle span { display: none; }     /* icon-only on mobile */
+
+  /* Main content full-width, with bottom padding so the tab bar doesn't cover it */
+  .main { padding: 18px 16px 84px; }
+
+  /* Collapse multi-column grids to fit narrow screens */
+  .sizing-row { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .log-stats { grid-template-columns: repeat(2, 1fr); }
+  .review-metrics { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .metric-grid, .metrics { grid-template-columns: 1fr 1fr !important; }
+  .condor-leg { grid-template-columns: 50px 80px 1fr; }
+
+  /* Page titles a touch smaller */
+  .page-title { font-size: 22px; }
+  .page-desc { font-size: 13px; }
+
+  /* Trade cards and tables comfortable on mobile */
+  .trade-card { padding: 16px; }
+  .log-table { font-size: 12px; }
+  .log-table th, .log-table td { padding: 6px 4px; }
+
+  /* Modals fill more of the screen */
+  .modal { width: 94%; max-width: none; margin: 0 auto; max-height: 88vh; overflow-y: auto; }
+
+  /* Auth screen card fits small screens */
+  .auth-card { padding: 28px 22px; margin: 16px; }
+
+  /* Bigger tap targets for buttons */
+  .scan-btn, .review-btn, .modal-save, .modal-cancel { min-height: 46px; }
+
+  /* Tables scroll horizontally rather than overflow */
+  .log-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
+
+/* Very small phones */
+@media (max-width: 400px) {
+  .sizing-row { grid-template-columns: 1fr; }
+  .review-metrics { grid-template-columns: repeat(2, 1fr); }
+  .nav-item { min-width: 56px; font-size: 9px; }
+}
 </style>
 </head>
 <body>
@@ -372,6 +471,9 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
   <main class="main">
     <!-- SCANNER -->
     <div id="page-scanner" class="page active">
+      <div class="mobile-status-bar" id="mobileStatusBar">
+        <span id="mobileCredStatus">Checking…</span>
+      </div>
       <div class="page-header">
         <div class="page-title">Options Scanner</div>
         <div class="page-desc">Live Schwab data + IBD50 multi-factor scoring. Regime-adaptive strategy selection. Earnings filtered automatically.</div>
@@ -498,6 +600,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
           <option value="expired">Expired</option>
         </select>
         <button class="add-manual-btn" onclick="openEditModal(null)">+ Add trade manually</button>
+        <button class="import-old-btn" id="importOldBtn" onclick="importOldTrades()" style="display:none">⤓ Import old trades from this browser</button>
         <button class="clear-btn" onclick="clearLog()">Clear all</button>
       </div>
       <div id="logContent"></div>
@@ -731,8 +834,47 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 </div>
 
 <script>
-let tradeLog = JSON.parse(localStorage.getItem('tradeLogv4') || '[]');
+// ── Trade data layer — server-backed (SQLite on the Pi/Mac) ─────────
+// tradeLog is the in-memory cache the UI reads from; it's loaded from the
+// server on startup and kept in sync as changes are written through.
+let tradeLog = [];
 let pendingTrade = null;
+
+async function loadTrades() {
+  try {
+    const r = await fetch('/api/trades');
+    tradeLog = await r.json();
+  } catch (e) {
+    console.error('Failed to load trades from server', e);
+    tradeLog = [];
+  }
+}
+
+async function apiAddTrade(trade) {
+  await fetch('/api/trades', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(trade)
+  });
+  await loadTrades();
+}
+
+async function apiUpdateTrade(id, fields) {
+  await fetch('/api/trades/' + id, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(fields)
+  });
+  await loadTrades();
+}
+
+async function apiDeleteTrade(id) {
+  await fetch('/api/trades/' + id, {method: 'DELETE'});
+  await loadTrades();
+}
+
+async function apiClearTrades() {
+  await fetch('/api/trades/clear', {method: 'POST'});
+  await loadTrades();
+}
 
 // ── Daily checklist strip ──────────────────────────────────────────
 let _checklistOpen = false;
@@ -744,7 +886,7 @@ function toggleChecklist() {
   if (chev) chev.style.transform = _checklistOpen ? 'rotate(90deg)' : 'rotate(0deg)';
 }
 
-// ── Theme toggle ───────────────────────────────────────────────────
+// ── Theme toggle (stays per-device in localStorage — display preference) ──
 let _theme = localStorage.getItem('scannerTheme') || 'dark';
 function toggleTheme() {
   _theme = (_theme === 'dark') ? 'light' : 'dark';
@@ -794,13 +936,28 @@ async function checkAuthStatus() {
       return true;
     }
 
-    if (d.auth_pending) {
+    if (d.auth_pending || d.manual_auth_needed) {
       screen.classList.add('visible');
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
-      msg.className = 'auth-status-msg pending';
-      msg.textContent = 'Schwab login page should be open in your browser…';
       steps.classList.add('visible');
+
+      if (d.manual_auth_needed && d.manual_auth_url) {
+        // Pi/headless: browser couldn't auto-open. Show the URL so the
+        // user can open it on their Mac/phone and complete the login there.
+        // The Pi's callback server is listening — the redirect comes back
+        // automatically once they approve, with no browser needed on the Pi.
+        btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab callback…';
+        msg.className = 'auth-status-msg pending';
+        msg.innerHTML = `
+          <div style="margin-bottom:10px">No browser available on this device. Open this URL on your Mac or phone:</div>
+          <div class="manual-auth-url" id="manualAuthUrl">${d.manual_auth_url}</div>
+          <button class="manual-auth-copy" onclick="navigator.clipboard.writeText(document.getElementById('manualAuthUrl').textContent).then(()=>this.textContent='Copied!').catch(()=>{})">Copy URL</button>
+          <div style="margin-top:10px;font-size:12px;color:var(--text3)">Log in to Schwab, click Allow, then wait — this screen updates automatically when done.</div>`;
+      } else {
+        btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
+        msg.className = 'auth-status-msg pending';
+        msg.textContent = 'Schwab login page should be open in your browser…';
+      }
       if (!_authPolling) {
         _authPolling = true;
         pollAuthCompletion();
@@ -895,6 +1052,7 @@ async function checkStatus() {
     const r = await fetch('/api/status'); const d = await r.json();
     const el = document.getElementById('credStatus');
     let html = d.ready ? '<span style="color:var(--green)">✓ Schwab connected</span>'
+      : d.has_credentials && d.auth_error ? `<span style="color:var(--amber)">⚠ Session expired — reconnect</span>`
       : d.has_credentials && !d.has_token ? '<span style="color:var(--amber)">⚠ Need to reconnect</span>'
       : '<span style="color:var(--red)">✗ Check config.json</span>';
     if (d.ibd50 && d.ibd50.count > 0) {
@@ -908,6 +1066,15 @@ async function checkStatus() {
     // Add disconnect link if connected
     html += '<br><a href="#" onclick="disconnectSchwab();return false;" style="font-size:10px;color:var(--text3)">Disconnect</a>';
     el.innerHTML = html;
+    // Mirror Schwab connection status to the mobile-only bar on the Scanner page
+    const mob = document.getElementById('mobileCredStatus');
+    if (mob) mob.innerHTML = d.ready
+      ? '<span style="color:var(--green)">✓ Schwab connected</span>'
+      : d.has_credentials && d.auth_error
+        ? '<span style="color:var(--amber)">⚠ Session expired</span>'
+      : d.has_credentials && !d.has_token
+        ? '<span style="color:var(--amber)">⚠ Need to reconnect</span>'
+        : '<span style="color:var(--red)">✗ Check config.json</span>';
     if (d.market) {
       const bar = document.getElementById('mktBar');
       const cls = d.market.session === 'regular' ? 'open' : d.market.session === 'pre' ? 'warn' : 'closed';
@@ -1015,22 +1182,49 @@ function updateProgress(msg, detail, pct) {
   }
 }
 
+let _sizingSaveTimer = null;
 function saveSizing() {
   const acct = parseFloat(document.getElementById('accountSize').value) || 10000;
   const risk = parseFloat(document.getElementById('riskPct').value) || 1.5;
-  localStorage.setItem('scannerAccount', acct);
-  localStorage.setItem('scannerRiskPct', risk);
+  // Update the live display immediately
   const maxRisk = acct * (risk / 100);
   document.getElementById('maxRiskDisplay').textContent = '$' + Math.round(maxRisk).toLocaleString();
   const echo = document.getElementById('riskPctEcho');
   if (echo) echo.textContent = risk;
+  // Persist to server (debounced so typing doesn't spam requests)
+  clearTimeout(_sizingSaveTimer);
+  _sizingSaveTimer = setTimeout(() => {
+    fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account: acct, risk_pct: risk})
+    }).catch(e => console.error('Failed to save settings', e));
+  }, 600);
 }
-function loadSizing() {
-  const acct = localStorage.getItem('scannerAccount');
-  const risk = localStorage.getItem('scannerRiskPct');
-  if (acct) document.getElementById('accountSize').value = acct;
-  if (risk) document.getElementById('riskPct').value = risk;
-  saveSizing();
+async function loadSizing() {
+  try {
+    const r = await fetch('/api/settings');
+    const s = await r.json();
+    if (s.account)  document.getElementById('accountSize').value = s.account;
+    if (s.risk_pct) document.getElementById('riskPct').value = s.risk_pct;
+  } catch (e) {
+    console.error('Failed to load settings', e);
+  }
+  // Update display without re-triggering a save
+  const acct = parseFloat(document.getElementById('accountSize').value) || 10000;
+  const risk = parseFloat(document.getElementById('riskPct').value) || 1.5;
+  document.getElementById('maxRiskDisplay').textContent = '$' + Math.round(acct*(risk/100)).toLocaleString();
+  const echo = document.getElementById('riskPctEcho');
+  if (echo) echo.textContent = risk;
+}
+
+let _scanInProgress = false;
+
+async function cancelScan() {
+  try {
+    await fetch('/api/scan/cancel', {method: 'POST'});
+    const main = document.getElementById('progressMain');
+    if (main) main.innerHTML = '<span class="spinner"></span>Cancelling…';
+  } catch(e) { /* ignore */ }
 }
 
 async function runScan() {
@@ -1039,7 +1233,15 @@ async function runScan() {
   const sector = document.getElementById('sectorFilter').value;
   const account = parseFloat(document.getElementById('accountSize').value) || 10000;
   const riskPct = parseFloat(document.getElementById('riskPct').value) || 1.5;
-  btn.disabled = true;
+
+  // Guard: if a scan is already running (this tab or another device), don't start a second
+  if (_scanInProgress) return;
+
+  _scanInProgress = true;
+  // Turn the Scan button into a Cancel button while running
+  btn.textContent = 'Cancel scan';
+  btn.classList.add('cancel-mode');
+  btn.onclick = cancelScan;
   _detailOpen = false;
 
   // Show progress panel
@@ -1056,6 +1258,14 @@ async function runScan() {
         <div class="progress-log" id="progressLog"></div>
       </div>
     </div>`;
+
+  function endScan() {
+    _scanInProgress = false;
+    btn.textContent = 'Run scan';
+    btn.classList.remove('cancel-mode');
+    btn.onclick = runScan;
+    btn.disabled = false;
+  }
 
   // Start SSE progress stream
   let sse = null;
@@ -1087,7 +1297,17 @@ async function runScan() {
     const r = await fetch(`/api/scan?sector=${encodeURIComponent(sector)}&account=${account}&risk_pct=${riskPct}`);
     const d = await r.json();
     if (sse) { sse.close(); sse = null; }
-    if (d.error) { out.innerHTML = `<div class="error-box">${d.error}</div>`; btn.disabled=false; return; }
+    if (r.status === 409 || d.already_running) {
+      out.innerHTML = `<div class="error-box">A scan is already running (possibly on another device). Wait for it to finish, or cancel it, before starting another.</div>`;
+      endScan();
+      return;
+    }
+    if (d.cancelled) {
+      out.innerHTML = `<div class="error-box">Scan cancelled.</div>`;
+      endScan();
+      return;
+    }
+    if (d.error) { out.innerHTML = `<div class="error-box">${d.error}</div>`; endScan(); return; }
     if (d.regime) renderRegime(d.regime);
     if (d.universe_meta) {
       const m = d.universe_meta; const ub = document.getElementById('universeBadge');
@@ -1104,7 +1324,7 @@ async function runScan() {
     if (sse) { sse.close(); sse = null; }
     out.innerHTML = `<div class="error-box">${e.message}</div>`;
   }
-  btn.disabled = false;
+  endScan();
 }
 
 // ── Rating helpers ─────────────────────────────────────────────────
@@ -1138,6 +1358,7 @@ function renderTrades(data) {
     const isTop = t.top_pick;
     html += `<div class="trade-card ${isTop?(sc==='bear'?'top-bear':'top'):''}">`;
     if (isTop) html += `<div class="top-badge ${sc}">★ top pick</div>`;
+    if (t.seen_before) html += `<div class="seen-badge">↻ seen before</div>`;
     html += `<div class="card-header">
       <div>
         <div style="display:flex;align-items:baseline;gap:8px">
@@ -1213,12 +1434,26 @@ function renderTrades(data) {
     const recRisk = t.rec_dollar_risk || 0;
     const recPct = t.rec_pct_of_account || 0;
     const recDebit = t.rec_total_debit || 0;
+    // IV context for debit spreads: lower IV = buying cheaper (good),
+    // elevated IV = paying up + exposed to IV contraction. Display only.
+    let ivCell = '';
+    if (t.iv !== '—' && t.iv != null) {
+      const ivv = parseFloat(t.iv);
+      let ivColor = 'var(--text)', ivLabel = '';
+      if (!isNaN(ivv)) {
+        if (ivv < 30)      { ivColor = 'var(--green)'; ivLabel = 'low'; }
+        else if (ivv < 50) { ivColor = 'var(--text)';  ivLabel = 'moderate'; }
+        else if (ivv < 70) { ivColor = 'var(--amber)'; ivLabel = 'elevated'; }
+        else               { ivColor = 'var(--red)';   ivLabel = 'high'; }
+      }
+      ivCell = `<div class="pos-item">IV<span style="color:${ivColor}">${t.iv}% ${ivLabel ? '· '+ivLabel : ''}</span></div>`;
+    }
     html += `<div class="pos-row">
       <div class="pos-item">Recommended<span style="color:var(--green)">${recC} contract${recC>1?'s':''}</span></div>
       <div class="pos-item">Risk at stop<span style="color:var(--red)">$${recRisk.toFixed(0)} (${recPct.toFixed(1)}%)</span></div>
       <div class="pos-item">Total debit<span>$${recDebit.toFixed(0)}</span></div>
       <div class="pos-item">Open interest<span>${t.open_interest}</span></div>
-      ${t.iv !== '—' ? `<div class="pos-item">IV<span>${t.iv}%</span></div>` : ''}
+      ${ivCell}
     </div>`;
     if (t.rec_warning) {
       html += `<div class="rec-warning">⚠ ${t.rec_warning}</div>`;
@@ -1320,9 +1555,9 @@ function openModal(trade) {
   document.getElementById('logModal').classList.add('open');
 }
 function closeModal() { document.getElementById('logModal').classList.remove('open'); pendingTrade=null; }
-function saveToLog() {
+async function saveToLog() {
   if (!pendingTrade) return;
-  tradeLog.unshift({
+  const trade = {
     id:Date.now(), ticker:pendingTrade.ticker, company:pendingTrade.company||pendingTrade.ticker,
     structure:pendingTrade.buy_leg+' / '+pendingTrade.sell_leg,
     expiration:pendingTrade.expiration,
@@ -1333,11 +1568,13 @@ function saveToLog() {
     returnPct:pendingTrade.return_on_debit, notes:document.getElementById('m_notes').value,
     status:'open', exitPrice:null, pnl:null,
     ibd_rs: pendingTrade.ibd_rs, ibd_score: pendingTrade.setup_score,
-  });
-  localStorage.setItem('tradeLogv4', JSON.stringify(tradeLog));
+    is_condor: pendingTrade.is_condor ? 1 : 0,
+  };
+  await apiAddTrade(trade);
   closeModal();
   const b = document.getElementById('logbtn-'+pendingTrade.ticker);
   if (b) { b.textContent='✓ Added'; b.classList.add('added'); b.disabled=true; }
+  renderLog();
 }
 
 // ── Edit / manual add modal ────────────────────────────────────────
@@ -1371,7 +1608,7 @@ function closeEditModal() {
   _editingId = null;
 }
 
-function saveEditModal() {
+async function saveEditModal() {
   const ticker = document.getElementById('e_ticker').value.trim().toUpperCase();
   if (!ticker) { alert('Ticker is required'); return; }
 
@@ -1393,19 +1630,17 @@ function saveEditModal() {
   };
 
   if (_editingId !== null) {
-    // Editing existing trade — preserve status, exitPrice, and recompute pnl
-    const t = tradeLog.find(x => x.id === _editingId);
-    if (t) {
-      Object.assign(t, data);
-      // Recompute P&L if exit price is set
-      if (t.exitPrice !== null && t.exitPrice !== undefined) {
-        t.pnl = (t.exitPrice - t.debit) * 100 * t.contracts;
-        t.status = t.pnl >= 0 ? 'won' : 'lost';
-      }
+    // Editing existing trade — preserve status/exitPrice, recompute pnl if exited
+    const t = tradeLog.find(x => x.id === _editingId) || {};
+    const merged = {...t, ...data};
+    if (merged.exitPrice !== null && merged.exitPrice !== undefined) {
+      merged.pnl = (merged.exitPrice - merged.debit) * 100 * merged.contracts;
+      merged.status = merged.pnl >= 0 ? 'won' : 'lost';
     }
+    await apiUpdateTrade(_editingId, merged);
   } else {
     // New manual trade
-    tradeLog.unshift({
+    await apiAddTrade({
       id: Date.now(),
       company: ticker,
       ...data,
@@ -1416,13 +1651,13 @@ function saveEditModal() {
       ibd_score: null,
     });
   }
-  localStorage.setItem('tradeLogv4', JSON.stringify(tradeLog));
   closeEditModal();
   renderLog();
 }
 
 // ── Log ────────────────────────────────────────────────────────────
 function renderLog() {
+  checkForOldTrades();   // show import button if this browser has old local data
   const filter = document.getElementById('logFilter').value;
   const filtered = filter==='all'?tradeLog:tradeLog.filter(t=>t.status===filter);
 
@@ -1510,25 +1745,77 @@ function renderLog() {
   html+='</tbody></table>';
   document.getElementById('logContent').innerHTML=html;
 }
-function updateStatus(id,s){
+async function updateStatus(id,s){
   const t=tradeLog.find(t=>t.id===id);
-  if(t){
-    t.status=s;
-    // An expired debit spread that finished out-of-the-money is a total loss
-    // of the debit. Set P&L consistently so the stats reflect reality.
-    if(s==='expired' && (t.exitPrice===null || t.exitPrice===undefined)){
-      t.exitPrice=0;
-      t.pnl=-(t.debit*100*t.contracts);
-    }
-    // If moved back to open, clear the exit/pnl so it isn't counted as closed
-    if(s==='open'){ t.exitPrice=null; t.pnl=null; }
-    localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));
+  if(!t) return;
+  const fields={status:s};
+  // An expired debit spread that finished out-of-the-money is a total loss
+  // of the debit. Set P&L consistently so the stats reflect reality.
+  if(s==='expired' && (t.exitPrice===null || t.exitPrice===undefined)){
+    fields.exitPrice=0;
+    fields.pnl=-(t.debit*100*t.contracts);
+  }
+  // If moved back to open, clear the exit/pnl so it isn't counted as closed
+  if(s==='open'){ fields.exitPrice=null; fields.pnl=null; }
+  await apiUpdateTrade(id, fields);
+  renderLog();
+}
+async function updatePnl(id,ep,debit,contracts){
+  if(!ep) return;
+  const e=parseFloat(ep);
+  const pnl=(e-debit)*100*contracts;
+  await apiUpdateTrade(id, {exitPrice:e, pnl:pnl, status: pnl>=0?'won':'lost'});
+  renderLog();
+}
+async function deleteTrade(id){
+  if(confirm('Delete?')){ await apiDeleteTrade(id); renderLog(); }
+}
+async function clearLog(){
+  if(confirm('Clear all trades?')){ await apiClearTrades(); renderLog(); }
+}
+
+// ── One-time migration: import trades from this browser's old localStorage ──
+function getOldLocalTrades() {
+  try {
+    const raw = localStorage.getItem('tradeLogv4');
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function checkForOldTrades() {
+  // Show the import button only if this browser has old localStorage trades
+  const btn = document.getElementById('importOldBtn');
+  if (!btn) return;
+  const old = getOldLocalTrades();
+  btn.style.display = old.length ? 'inline-block' : 'none';
+  if (old.length) btn.textContent = `⤓ Import ${old.length} old trade${old.length>1?'s':''} from this browser`;
+}
+
+async function importOldTrades() {
+  const old = getOldLocalTrades();
+  if (!old.length) { alert('No old trades found in this browser.'); return; }
+  if (!confirm(`Import ${old.length} trade${old.length>1?'s':''} from this browser into the shared server database?`)) return;
+  try {
+    const r = await fetch('/api/trades/import', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(old)
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    // Archive the old data under a backup key, then clear the live key so the
+    // button disappears and we never double-import.
+    localStorage.setItem('tradeLogv4_imported_backup', JSON.stringify(old));
+    localStorage.removeItem('tradeLogv4');
+    await loadTrades();
     renderLog();
+    checkForOldTrades();
+    alert(`Imported ${d.imported} trade${d.imported>1?'s':''}. They're now on the server and visible from all your devices.`);
+  } catch(e) {
+    alert('Import failed: ' + e.message);
   }
 }
-function updatePnl(id,ep,debit,contracts){const t=tradeLog.find(t=>t.id===id);if(t&&ep){const e=parseFloat(ep);t.exitPrice=e;t.pnl=(e-debit)*100*contracts;t.status=t.pnl>=0?'won':'lost';localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
-function deleteTrade(id){if(confirm('Delete?')){tradeLog=tradeLog.filter(t=>t.id!==id);localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
-function clearLog(){if(confirm('Clear all trades?')){tradeLog=[];localStorage.setItem('tradeLogv4',JSON.stringify(tradeLog));renderLog();}}
 
 // ── Daily Review ──────────────────────────────────────────────────
 async function runReview() {
@@ -1537,6 +1824,7 @@ async function runReview() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>Fetching live prices…';
 
+  await loadTrades();   // pull latest from server (may include trades added on other devices)
   const open = tradeLog.filter(t => t.status === 'open');
   if (!open.length) {
     out.innerHTML = '<div class="review-empty">No open trades in your log.<br><span style="font-size:13px;color:var(--text3)">Add trades from the Scanner tab first.</span></div>';
@@ -1603,7 +1891,7 @@ function renderReview(data) {
     html += `<div class="review-card ${u}">
       <div class="review-header">
         <div>
-          <div class="review-ticker">${t.ticker}</div>
+          <div class="review-ticker">${t.ticker}${t.underlying_price ? `<span style="font-size:13px;font-weight:400;color:var(--text2);font-family:'DM Mono',monospace;margin-left:10px">$${t.underlying_price.toFixed(2)}</span>` : ''}</div>
           <div class="review-structure">${t.is_condor ? '🦅 ' : ''}${t.structure}</div>
           <div style="font-size:11px;color:var(--text2);margin-top:3px">Exp ${t.expiration} · ${t.dte !== null ? t.dte + ' DTE' : '—'} · ${t.contracts} contracts</div>
         </div>
@@ -1648,9 +1936,35 @@ function renderReview(data) {
   out.innerHTML = html;
 }
 
-// Apply saved theme and sizing on load
-applyTheme();
-loadSizing();
+// ── Page load init ─────────────────────────────────────────────────
+applyTheme();                       // theme is local (per-device)
+
+// Load server-backed data (trades + settings), then render the log
+(async () => {
+  await loadSizing();               // account size + risk % from server
+  await loadTrades();               // trade log from server
+  renderLog();                      // render with the loaded data
+})();
+
+// If a scan is already running (e.g. started on another device or before a
+// reconnect), reflect that so we don't start a second one.
+(async () => {
+  try {
+    const r = await fetch('/api/scan/status');
+    const d = await r.json();
+    if (d.running) {
+      _scanInProgress = true;
+      const btn = document.getElementById('scanBtn');
+      if (btn) {
+        btn.textContent = 'Cancel scan';
+        btn.classList.add('cancel-mode');
+        btn.onclick = cancelScan;
+      }
+      const out = document.getElementById('scanOutput');
+      if (out) out.innerHTML = '<div class="error-box">A scan is already running (started elsewhere or before reconnect). You can cancel it with the button above.</div>';
+    }
+  } catch(e) { /* ignore */ }
+})();
 
 // Check auth first, then status
 checkAuthStatus().then(connected => {

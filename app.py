@@ -6,7 +6,21 @@ Options Trade Scanner v4
 Run: python app.py
 """
 
-import os, json, math, time, webbrowser, threading, csv, io, pathlib, re
+import os, json, math, time, webbrowser, threading, csv, io, pathlib, re, sqlite3
+import sys
+
+# ── Force UTF-8 output ────────────────────────────────────────────────────────
+# Under systemd (and some other non-interactive environments) Python may default
+# stdout/stderr to latin-1, which crashes on the Unicode characters used in the
+# startup banner and progress prints (em-dash, ✓, etc.). Reconfigure to UTF-8 so
+# logging works identically whether run by hand or as a service.
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass  # older Python without reconfigure(); env var below is the fallback
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
 from datetime import datetime, timedelta, date
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
@@ -27,9 +41,64 @@ SCHWAB_SECRET = _config.get('schwab_client_secret', os.environ.get('SCHWAB_APP_S
 CALLBACK_URL  = 'https://127.0.0.1:8182'
 TOKEN_PATH    = str(pathlib.Path(__file__).parent / 'schwab_token.json')
 
+# Port the web server listens on. Set "server_port" in config.json to change it.
+# (This is separate from the Schwab OAuth callback port 8182, which is fixed
+#  and registered in your Schwab Developer Portal — do not change that.)
+try:
+    SERVER_PORT = int(_config.get('server_port', os.environ.get('SCANNER_PORT', 8080)))
+except (ValueError, TypeError):
+    SERVER_PORT = 8080
+
+# ── SQLite storage (single portable file: scanner.db) ─────────────────────────
+# This file holds trades + settings, shared across all clients (Mac, phone).
+# To move to another machine, just copy scanner.db — it's fully self-contained.
+DB_PATH = str(pathlib.Path(__file__).parent / 'scanner.db')
+_db_lock = threading.Lock()
+
+def db_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')      # safe concurrent reads/writes
+    return conn
+
+def init_db():
+    """Create tables if they don't exist. Safe to call on every startup."""
+    with _db_lock, db_conn() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id          INTEGER PRIMARY KEY,
+            ticker      TEXT, company TEXT, structure TEXT, expiration TEXT,
+            entryDate   TEXT, contracts INTEGER, debit REAL,
+            target      REAL, stop REAL, returnPct REAL, notes TEXT,
+            status      TEXT DEFAULT 'open',
+            exitPrice   REAL, pnl REAL,
+            ibd_rs      INTEGER, ibd_score INTEGER,
+            is_condor   INTEGER DEFAULT 0,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY, value TEXT
+        )''')
+        conn.commit()
+
+# Columns the trades table accepts — used to filter incoming JSON safely
+_TRADE_COLS = ['id','ticker','company','structure','expiration','entryDate',
+               'contracts','debit','target','stop','returnPct','notes','status',
+               'exitPrice','pnl','ibd_rs','ibd_score','is_condor']
+
+
+
 # ── Progress streaming (Server-Sent Events) ─────────────────────────────────
 import queue as _queue
 _progress_queue = _queue.Queue(maxsize=200)
+
+# ── Scan concurrency control ─────────────────────────────────────────────────
+# Only one scan may run at a time. A second request is rejected rather than
+# starting a concurrent scan (which would double-hit the Schwab API and race
+# on the progress queue). _scan_cancel lets a running scan be stopped.
+_scan_lock    = threading.Lock()
+_scan_running = False
+_scan_cancel  = threading.Event()
+_last_scan_tickers = set()   # tickers from the previous scan, for "seen before" flagging
 
 def emit(msg, detail=False):
     """Push a progress message. detail=True = shown only in expanded view."""
@@ -37,6 +106,15 @@ def emit(msg, detail=False):
         _progress_queue.put_nowait({'msg': msg, 'detail': detail})
     except:
         pass  # queue full — drop message
+
+class ScanCancelled(Exception):
+    """Raised inside a scan when the user requests cancellation."""
+    pass
+
+def check_cancel():
+    """Call at safe points during a scan; raises if cancellation was requested."""
+    if _scan_cancel.is_set():
+        raise ScanCancelled()
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 class RateLimiter:
@@ -62,11 +140,16 @@ def schwab_call(fn, *args, retries=3, **kwargs):
                 wait = 61 if '429-005' in resp.headers.get('X-RateLimit-Violated','') else 31
                 print(f'Rate limit 429 — waiting {wait}s'); time.sleep(wait); continue
             if resp.status_code == 401:
-                print('Token expired — re-authenticating')
-                global _schwab_client; _schwab_client = None
-                init_schwab()
-                if _schwab_client: continue
-                return None  # auth failed
+                # The access token is invalid AND the refresh token behind it has
+                # likely expired too (refresh tokens last ~7 days). Re-loading the
+                # same token file can't fix this — it would just load the same
+                # dead token again. Clear the client and surface the failure so
+                # the UI shows "needs reconnect" instead of silently looping.
+                print('Token expired (401) — clearing client, user must reconnect')
+                global _schwab_client, _auth_error
+                _schwab_client = None
+                _auth_error = 'Schwab session expired. Please reconnect.'
+                return None
             if resp.status_code in (400, 404): return None
             print(f'API {resp.status_code} for {args[:1]}')
             if attempt < retries-1: time.sleep(2**attempt)
@@ -82,6 +165,7 @@ _schwab_client = None
 # ── Auth state ───────────────────────────────────────────────────────────────
 _auth_pending = False   # True when login flow is running in background
 _auth_error   = None    # Last auth error message if any
+_manual_auth_url = None # Set when headless fallback needs user to open a URL manually
 
 def get_client():
     """Return existing client."""
@@ -127,31 +211,104 @@ def init_schwab():
 
 def _login_flow_thread():
     """
-    Runs schwab-py's client_from_login_flow in a background thread.
-    This function starts the built-in HTTPS callback server on port 8182,
-    opens the Schwab login page automatically, and saves the token.
-    The UI polls /api/auth/status to detect completion.
+    Runs the Schwab login flow in a background thread.
+
+    Primary path: client_from_login_flow auto-opens a browser. Works on Mac
+    or any desktop with Firefox/Chrome available.
+
+    Fallback path (Pi/headless): when no browser is available, builds the
+    auth URL manually, surfaces it through /api/auth/status so the UI can
+    display it, then starts the callback server and waits for the redirect.
+    The user opens the URL on any device, completes login, and the callback
+    comes back to the Pi's port 8182 automatically.
     """
-    global _schwab_client, _auth_pending, _auth_error
+    global _schwab_client, _auth_pending, _auth_error, _manual_auth_url
+    _manual_auth_url = None
     try:
         import schwab
         print('  Starting Schwab login flow…')
-        _schwab_client = schwab.auth.client_from_login_flow(
-            api_key=SCHWAB_KEY,
-            app_secret=SCHWAB_SECRET,
-            callback_url=CALLBACK_URL,
-            token_path=TOKEN_PATH,
-            enforce_enums=False,
-            interactive=False,      # don't wait for console input — open browser directly
-            callback_timeout=300.0, # wait up to 5 min for user to complete login
+        # ── Primary: auto-browser flow ────────────────────────────────────
+        try:
+            _schwab_client = schwab.auth.client_from_login_flow(
+                api_key=SCHWAB_KEY,
+                app_secret=SCHWAB_SECRET,
+                callback_url=CALLBACK_URL,
+                token_path=TOKEN_PATH,
+                enforce_enums=False,
+                interactive=False,
+                callback_timeout=300.0,
+            )
+            _auth_pending = False
+            _auth_error   = None
+            print('  ✓ Schwab authentication complete — token saved!')
+            return
+        except Exception as browser_err:
+            err_str = str(browser_err).lower()
+            is_browser_err = any(w in err_str for w in
+                                  ['browser', 'display', 'runnable', 'could not locate'])
+            if not is_browser_err:
+                raise  # different error — re-raise, don't fall through
+            print(f'  ⚠  Auto-browser unavailable ({browser_err})')
+            print('      Falling back to manual flow — surfacing URL in the UI')
+
+        # ── Fallback: headless/Pi flow ────────────────────────────────────
+        # Build the Schwab auth URL and publish it so the UI can display it.
+        # The user opens it on any browser (Mac, phone), completes login, and
+        # the browser is redirected to https://127.0.0.1:8182?code=...
+        # schwab-py's callback server (started by client_from_login_flow
+        # below) catches that redirect without needing a local browser at all.
+        import urllib.parse, secrets as _sec
+        state     = _sec.token_urlsafe(16)
+        auth_url  = (
+            'https://api.schwabapi.com/v1/oauth/authorize'
+            f'?client_id={urllib.parse.quote(SCHWAB_KEY)}'
+            f'&redirect_uri={urllib.parse.quote(CALLBACK_URL)}'
+            '&response_type=code'
+            f'&state={state}'
         )
-        _auth_pending = False
-        _auth_error   = None
-        print('  ✓ Schwab authentication complete — token saved!')
+        _manual_auth_url = auth_url
+        # Signal the UI that it needs to show the URL
+        _auth_error = 'MANUAL_AUTH_REQUIRED'
+        print(f'  Auth URL ready (will be shown in the UI)')
+        print(f'  Waiting for Schwab callback on port 8182…')
+
+        # Re-run client_from_login_flow but now the browser has ALREADY been
+        # "opened" by the user on their own device. The library just needs to
+        # listen on port 8182 for the OAuth callback. Passing requested_browser=''
+        # (empty string) prevents it from trying to auto-open a browser again
+        # while still running the callback server.
+        try:
+            _schwab_client = schwab.auth.client_from_login_flow(
+                api_key=SCHWAB_KEY,
+                app_secret=SCHWAB_SECRET,
+                callback_url=CALLBACK_URL,
+                token_path=TOKEN_PATH,
+                enforce_enums=False,
+                interactive=False,
+                callback_timeout=300.0,
+                requested_browser='',  # suppress browser open; we already sent the user there
+            )
+            _manual_auth_url = None
+            _auth_pending = False
+            _auth_error   = None
+            print('  ✓ Manual Schwab authentication complete — token saved!')
+        except Exception as inner_e:
+            # requested_browser='' may not be supported in older schwab-py.
+            # Final fallback: just wait — if the user visits the URL and the
+            # callback server was already started by the first attempt, it may
+            # still complete. Otherwise surface the error clearly.
+            print(f'  ✗ Headless flow error: {inner_e}')
+            _auth_error = (f'Browser unavailable on this machine. '
+                           f'Run authenticate.py from the terminal instead: '
+                           f'python3 authenticate.py')
+            _manual_auth_url = None
+            _auth_pending = False
+
     except Exception as e:
         import traceback; traceback.print_exc()
         _auth_error   = str(e)
         _auth_pending = False
+        _manual_auth_url = None
         print(f'  ✗ Login flow error: {e}')
 
 # ── IBD50 storage — now stores full row data ──────────────────────────────────
@@ -343,49 +500,83 @@ def is_bad_acc_dis(rating):
     return str(rating).strip() in ('D+','D','D-','E')
 
 # ── Market hours ──────────────────────────────────────────────────────────────
-_mkt_cache = {'data': None, 'date': None}
+_mkt_cache = {'hours': None, 'date': None}
 
 def market_status(client):
+    """
+    Returns the current market session (pre/regular/after/closed).
+
+    IMPORTANT: the market's hours for today don't change, but the CURRENT
+    SESSION does — it must be recomputed against the live clock on every
+    call. Caching the whole result (including session) was the bug: once
+    it computed "regular/open" at, say, 11am, it stayed cached as green
+    until midnight even after the market closed at 4pm. The fix caches
+    only the day's hours (the part that's genuinely stable) and always
+    re-evaluates now() vs those hours fresh.
+    """
     today = date.today().isoformat()
-    if _mkt_cache['date'] == today and _mkt_cache['data']:
-        return _mkt_cache['data']
+    if _mkt_cache['date'] == today and _mkt_cache.get('hours'):
+        return _compute_session(_mkt_cache['hours'])
     try:
         resp = schwab_call(client.get_market_hours,
                            markets=['option'],
                            date=date.today())
         if resp:
-            data    = resp.json()
-            eqo     = data.get('option', {}).get('EQO', {})
-            is_open = eqo.get('isOpen', False)
-            if not is_open:
-                result = {'is_open': False, 'session': 'closed',
-                          'message': 'Options market closed today.'}
-            else:
-                regular = eqo.get('sessionHours', {}).get('regularMarket', [{}])[0]
-                try:
-                    start = datetime.fromisoformat(regular.get('start',''))
-                    end   = datetime.fromisoformat(regular.get('end',''))
-                    now   = datetime.now()
-                    if now < start:
-                        mins = int((start-now).seconds/60)
-                        result = {'is_open':False,'session':'pre',
-                                  'message':f'Pre-market. Opens in ~{mins} min.'}
-                    elif now > end:
-                        result = {'is_open':False,'session':'after',
-                                  'message':'After-hours. Using end-of-day data.'}
-                    else:
-                        result = {'is_open':True,'session':'regular',
-                                  'message':f'Live. Closes {end.strftime("%I:%M %p")}.'}
-                except:
-                    result = {'is_open':is_open,'session':'regular' if is_open else 'closed',
-                              'message':'Market status from Schwab.'}
+            data = resp.json()
+            eqo  = data.get('option', {}).get('EQO', {})
+            is_open_today = eqo.get('isOpen', False)
+            regular = eqo.get('sessionHours', {}).get('regularMarket', [{}])[0] if is_open_today else {}
+            hours = {'is_open_today': is_open_today,
+                     'start': regular.get('start'), 'end': regular.get('end')}
+            # Cache only the day's hours — these are genuinely stable for
+            # the rest of the day. The session itself is always computed fresh.
+            _mkt_cache.update({'hours': hours, 'date': today})
+            return _compute_session(hours)
         else:
-            result = {'is_open':True,'session':'unknown',
-                      'message':'Could not verify market hours.'}
-        _mkt_cache.update({'data':result,'date':today})
-        return result
+            # Schwab call failed (rate limit, network, etc). FAIL SAFE: assume
+            # closed/unknown rather than open — we genuinely don't know.
+            # NOT cached, so the next poll (e.g. 60s later) tries again fresh.
+            return {'is_open': False, 'session': 'unknown',
+                    'message': 'Could not verify market hours — assuming closed until confirmed.'}
+    except Exception:
+        # Same fail-safe direction on a hard exception. Not cached, so a
+        # transient error self-corrects on the next poll.
+        return {'is_open': False, 'session': 'unknown',
+                'message': 'Market hours unavailable — assuming closed until confirmed.'}
+
+def _compute_session(hours):
+    """Compute the CURRENT session against the live clock from cached day-hours."""
+    if not hours.get('is_open_today'):
+        return {'is_open': False, 'session': 'closed',
+                'message': 'Options market closed today.'}
+    try:
+        start = datetime.fromisoformat(hours['start'])
+        end   = datetime.fromisoformat(hours['end'])
+        # Schwab's timestamps are timezone-aware (carry a UTC offset, e.g.
+        # "...-04:00"). datetime.now() is naive (no timezone) and Python
+        # raises TypeError comparing naive vs aware — this was the actual
+        # cause of the "time parse issue" message (fromisoformat itself
+        # succeeds; it's the later < / > comparison that fails). Fix: make
+        # `now` aware in the SAME timezone as the parsed Schwab timestamps,
+        # rather than comparing across mismatched timezone-awareness.
+        if start.tzinfo is not None:
+            now = datetime.now(start.tzinfo)
+        else:
+            now = datetime.now()
+        if now < start:
+            mins = int((start-now).seconds/60)
+            return {'is_open': False, 'session': 'pre',
+                    'message': f'Pre-market. Opens in ~{mins} min.'}
+        elif now > end:
+            return {'is_open': False, 'session': 'after',
+                    'message': 'After-hours. Using end-of-day data.'}
+        else:
+            return {'is_open': True, 'session': 'regular',
+                    'message': f'Live. Closes {end.strftime("%I:%M %p")}.'}
     except Exception as e:
-        return {'is_open':True,'session':'unknown','message':'Market hours unavailable.'}
+        print(f'Market session compute error: {type(e).__name__}: {e}')
+        return {'is_open': False, 'session': 'unknown',
+                'message': 'Market status from Schwab (time parse issue).'}
 
 # ── Universe ──────────────────────────────────────────────────────────────────
 _universe_cache = {'symbols':[],'timestamp':None}
@@ -772,7 +963,7 @@ def get_best_spread(client, symbol, price, regime):
     - Use mark (mid) prices throughout for realistic fills
     - OI filter: both legs need OI >= 10 (retail size)
     - Bid/ask filter: < 20% of mid (percentage, not absolute)
-    - Return filter: 20-45% return on debit
+    - Return filter: 25-50% return on debit (matches the enforced check below)
     - No delta filter — price proximity is more reliable given Schwab chain issues
     """
     try:
@@ -1106,9 +1297,17 @@ def calc_position_size(debit, account_size, risk_pct, max_debit_budget=10000,
 
     contracts = max(1, int(raw_contracts))   # floor, minimum 1
 
-    # Cap by total capital budget (use debit for verticals; for condors debit is
-    # the credit collected so capital deployed is better measured by risk)
-    per_contract_capital = (debit * 100) if debit > 0 else risk_per_contract
+    # Capital deployed per contract — what actually caps the budget and is
+    # shown as "Total debit" on the card. For verticals this is the debit
+    # paid. For condors (risk_per_contract_override given), the true capital
+    # at risk is the override (max loss), NOT the credit collected — using
+    # the credit here would understate risk and disagree with dollar_risk,
+    # which already correctly uses the override.
+    if risk_per_contract_override:
+        per_contract_capital = risk_per_contract_override
+    else:
+        per_contract_capital = debit * 100
+
     max_by_budget = int(max_debit_budget / per_contract_capital) if per_contract_capital > 0 else contracts
     if max_by_budget >= 1:
         contracts = min(contracts, max_by_budget)
@@ -1183,8 +1382,13 @@ def build_rationale(stock, spread, regime):
         parts.append(f"RS proxy ~{rs}.")
 
     parts.append(f"10d momentum {stock['mom10']:+.1f}%.")
-    iv_str=f"IV {spread['iv']}% — {'elevated premium' if spread['iv']>30 else 'normal'}." if spread.get('iv') else ''
-    if iv_str: parts.append(iv_str)
+    if spread.get('iv'):
+        _iv = spread['iv']
+        if   _iv < 30: _ivdesc = 'low — buying relatively cheap'
+        elif _iv < 50: _ivdesc = 'moderate'
+        elif _iv < 70: _ivdesc = 'elevated — paying up, some IV-contraction risk'
+        else:          _ivdesc = 'high — rich premium, watch for IV contraction'
+        parts.append(f"IV {_iv}% ({_ivdesc}).")
     parts.append(f"${spread['entry']:.2f} debit targets ${spread['profit_target']:.2f} ({spread['return_on_debit']}% return).")
     if not ibd: parts.append("Verify IBD RS at ibd.com before entry.")
 
@@ -1194,17 +1398,163 @@ def build_rationale(stock, spread, regime):
 @app.route('/')
 def index(): return send_from_directory('static','index.html')
 
+@app.route('/manifest.json')
+def manifest():
+    """PWA manifest — makes the app installable to a phone home screen."""
+    return jsonify({
+        "name": "Options Trade Scanner",
+        "short_name": "TradeScan",
+        "description": "Schwab + IBD options spread scanner",
+        "start_url": "/",
+        "display": "standalone",
+        "orientation": "portrait",
+        "background_color": "#0e0f11",
+        "theme_color": "#0e0f11",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}
+        ]
+    })
+
+@app.route('/icon-<size>.png')
+def app_icon(size):
+    """Generate a simple app icon on the fly (green 'TS' on dark)."""
+    try:
+        sz = 512 if '512' in size else 192
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new('RGB', (sz, sz), '#0e0f11')
+        d = ImageDraw.Draw(img)
+        margin = sz // 8
+        d.rounded_rectangle([margin, margin, sz-margin, sz-margin],
+                            radius=sz//10, fill='#15171a', outline='#2dd4a0', width=max(2, sz//64))
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", sz//3)
+        except:
+            font = ImageFont.load_default()
+        text = "TS"
+        bbox = d.textbbox((0,0), text, font=font)
+        tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+        d.text(((sz-tw)/2 - bbox[0], (sz-th)/2 - bbox[1]), text, fill='#2dd4a0', font=font)
+        import io
+        buf = io.BytesIO(); img.save(buf, 'PNG'); buf.seek(0)
+        from flask import Response
+        return Response(buf.getvalue(), mimetype='image/png')
+    except Exception:
+        import base64
+        from flask import Response
+        px = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
+        return Response(px, mimetype='image/png')
+
+# ── Trades storage (SQLite, shared across all clients) ───────────────────────
+@app.route('/api/trades', methods=['GET'])
+def get_trades():
+    """Return all trades, newest first (matches the old localStorage order)."""
+    with _db_lock, db_conn() as conn:
+        rows = conn.execute('SELECT * FROM trades ORDER BY id DESC').fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/trades', methods=['POST'])
+def add_trade():
+    """Insert a new trade. Accepts the trade JSON the frontend builds."""
+    t = request.get_json(silent=True) or {}
+    data = {k: t.get(k) for k in _TRADE_COLS}
+    if not data.get('id'):
+        data['id'] = int(time.time() * 1000)   # match Date.now() style ids
+    if not data.get('status'):
+        data['status'] = 'open'
+    cols = [k for k in _TRADE_COLS if data.get(k) is not None]
+    placeholders = ','.join('?' for _ in cols)
+    with _db_lock, db_conn() as conn:
+        conn.execute(f'INSERT OR REPLACE INTO trades ({",".join(cols)}) VALUES ({placeholders})',
+                     [data[c] for c in cols])
+        conn.commit()
+    return jsonify({'status': 'ok', 'id': data['id']})
+
+@app.route('/api/trades/<int:trade_id>', methods=['PUT'])
+def update_trade(trade_id):
+    """Update an existing trade (status change, exit price, edits)."""
+    t = request.get_json(silent=True) or {}
+    fields = {k: t.get(k) for k in _TRADE_COLS if k != 'id' and k in t}
+    if not fields:
+        return jsonify({'status': 'no_change'})
+    sets = ','.join(f'{k}=?' for k in fields)
+    with _db_lock, db_conn() as conn:
+        conn.execute(f'UPDATE trades SET {sets} WHERE id=?',
+                     list(fields.values()) + [trade_id])
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/trades/<int:trade_id>', methods=['DELETE'])
+def delete_trade(trade_id):
+    with _db_lock, db_conn() as conn:
+        conn.execute('DELETE FROM trades WHERE id=?', [trade_id])
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/trades/clear', methods=['POST'])
+def clear_trades():
+    with _db_lock, db_conn() as conn:
+        conn.execute('DELETE FROM trades')
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/trades/import', methods=['POST'])
+def import_trades():
+    """One-time bulk import (e.g. from the Mac's old localStorage)."""
+    payload = request.get_json(silent=True) or []
+    if not isinstance(payload, list):
+        return jsonify({'error': 'expected a list of trades'}), 400
+    imported = 0
+    with _db_lock, db_conn() as conn:
+        for t in payload:
+            data = {k: t.get(k) for k in _TRADE_COLS}
+            if not data.get('id'):
+                data['id'] = int(time.time() * 1000) + imported
+            if not data.get('status'):
+                data['status'] = 'open'
+            cols = [k for k in _TRADE_COLS if data.get(k) is not None]
+            placeholders = ','.join('?' for _ in cols)
+            conn.execute(f'INSERT OR REPLACE INTO trades ({",".join(cols)}) VALUES ({placeholders})',
+                         [data[c] for c in cols])
+            imported += 1
+        conn.commit()
+    return jsonify({'status': 'ok', 'imported': imported})
+
+# ── Settings storage (account size, risk %) ──────────────────────────────────
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    with _db_lock, db_conn() as conn:
+        rows = conn.execute('SELECT key, value FROM settings').fetchall()
+    out = {r['key']: r['value'] for r in rows}
+    # Defaults if not yet set
+    out.setdefault('account', '10000')
+    out.setdefault('risk_pct', '1.5')
+    return jsonify(out)
+
+@app.route('/api/settings', methods=['POST'])
+def save_settings():
+    s = request.get_json(silent=True) or {}
+    with _db_lock, db_conn() as conn:
+        for k, v in s.items():
+            conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                         [str(k), str(v)])
+        conn.commit()
+    return jsonify({'status': 'ok'})
+
 @app.route('/api/auth/status')
 def api_auth_status():
     """Poll this to know if auth is needed / in progress / complete."""
     connected = _schwab_client is not None
+    is_manual = _auth_error == 'MANUAL_AUTH_REQUIRED'
     return jsonify({
-        'connected':      connected,
-        'auth_pending':   _auth_pending,
-        'auth_error':     _auth_error,
-        'needs_auth':     not connected and not _auth_pending,
-        'credentials_ok': bool(SCHWAB_KEY and SCHWAB_SECRET
-                               and 'YOUR_CLIENT_ID' not in SCHWAB_KEY),
+        'connected':       connected,
+        'auth_pending':    _auth_pending,
+        'auth_error':      _auth_error if not is_manual else None,
+        'needs_auth':      not connected and not _auth_pending,
+        'credentials_ok':  bool(SCHWAB_KEY and SCHWAB_SECRET
+                                and 'YOUR_CLIENT_ID' not in SCHWAB_KEY),
+        'manual_auth_url': _manual_auth_url,  # set when browser unavailable on this machine
+        'manual_auth_needed': is_manual,
     })
 
 @app.route('/api/auth/start', methods=['POST'])
@@ -1236,12 +1586,25 @@ def api_auth_disconnect():
 
 @app.route('/api/status')
 def api_status():
+    global _schwab_client
     has_creds = bool(SCHWAB_KEY and SCHWAB_SECRET)
-    # Source of truth for "connected" is the live client object, not just the file
-    connected = _schwab_client is not None
     has_token = pathlib.Path(TOKEN_PATH).exists()
     config_ok = _config_path.exists() and 'YOUR_CLIENT_ID' not in _config.get('schwab_client_id','YOUR_CLIENT_ID')
     client = _schwab_client
+
+    # Proactively verify the token still works, independent of the daily
+    # market-hours cache. Without this, a token that dies mid-session would
+    # keep showing "connected" until the cache naturally expired at midnight,
+    # because market_status() only hits Schwab once per day when cached.
+    if client:
+        check = schwab_call(client.get_quotes, ['SPY'])
+        if check is None and _schwab_client is None:
+            # schwab_call's 401 handler already cleared _schwab_client — the
+            # token is confirmed dead. Fall through with client=None below.
+            client = None
+
+    # Source of truth for "connected" is the live client object, not just the file
+    connected = client is not None
     mkt = market_status(client) if client else {'is_open':False,'session':'unknown','message':'Connect Schwab to check market hours.'}
     ibd_summary = {}
     if _ibd50_data:
@@ -1250,7 +1613,7 @@ def api_status():
                        'avg_rs':round(sum(rs_vals)/len(rs_vals),1) if rs_vals else None,
                        'updated':json.load(open(IBD50_PATH)).get('updated','') if IBD50_PATH.exists() else ''}
     return jsonify({'has_credentials':has_creds,'has_token':has_token,'config_file':config_ok,
-                    'ready':connected,'market':mkt,
+                    'ready':connected,'market':mkt,'auth_error':_auth_error,
                     'ibd50':ibd_summary,'universe_count':len(_universe_cache['symbols'])})
 
 @app.route('/api/regime')
@@ -1288,8 +1651,26 @@ def api_progress():
 
 @app.route('/api/scan')
 def api_scan():
+    global _scan_running
+    global _last_scan_tickers
+
+    # ── Concurrency guard FIRST: reject a second scan if one is running ──
+    # (Checked before the client guard so a duplicate is always rejected
+    #  consistently, regardless of connection state.)
+    with _scan_lock:
+        if _scan_running:
+            return jsonify({'error': 'A scan is already running. Wait for it to '
+                                     'finish or cancel it before starting another.',
+                            'already_running': True}), 409
+        _scan_running = True
+        _scan_cancel.clear()
+
+    # Now validate the client; release the lock if we can't proceed.
     client=get_client()
-    if not client: return jsonify({'error':'Schwab not configured. Check config.json.'}),400
+    if not client:
+        _scan_running = False
+        return jsonify({'error':'Schwab not configured. Check config.json.'}),400
+
     sector_filter=request.args.get('sector','all').lower()
     # Position sizing inputs (from the Position Sizing panel)
     try:    account_size = float(request.args.get('account', 10000))
@@ -1324,14 +1705,23 @@ def api_scan():
         emit(f'Universe ready: {len(pre_filtered)} stocks to screen')
 
         # ── Smart ordering: IBD50 first, then movers, then S&P500 ────────────
-        # This means the best candidates are screened first and we can stop early
+        # Within each tier, sort by IBD score descending so the same
+        # highest-scoring stocks are always processed first regardless of
+        # set/dict ordering non-determinism. This makes consecutive scans
+        # return the same top 8 as long as prices haven't moved significantly.
         ibd_set   = set(ibd50_symbols())
         mover_set = set(get_movers(client))
         def priority(sym):
             if sym in ibd_set:   return 0
             if sym in mover_set: return 1
             return 2
-        pre_filtered.sort(key=priority)
+        def sort_key(sym):
+            # Primary: tier (0=IBD50, 1=movers, 2=SP500)
+            # Secondary: IBD score descending (negate so higher score = earlier)
+            ibd = ibd50_get(sym)
+            score = ibd.get('rs_rating', 0) if ibd else 0
+            return (priority(sym), -score)
+        pre_filtered.sort(key=sort_key)
 
         # Screen at most 60 stocks — IBD50+movers first guarantees best picks
         # At 80 req/min: 60 price_history + 60 earnings = ~90s max
@@ -1339,6 +1729,7 @@ def api_scan():
         candidates=[]; screened=0; max_screen=60
         for symbol in pre_filtered:
             if screened >= max_screen: break
+            check_cancel()   # stop promptly if user cancelled
             if screened % 10 == 0:
                 print(f'  Screening {screened}/{max_screen}: {symbol}…')
                 emit(f'Screening stocks… {screened}/{max_screen}')
@@ -1373,6 +1764,7 @@ def api_scan():
         score_floor = 88 if regime == 'caution' else 0
 
         for stock in candidates[:20]:
+            check_cancel()   # stop promptly if user cancelled
             sym=stock['symbol']
             if stock['score'] < score_floor:
                 print(f'  Skipping {sym} — score {stock["score"]} below caution floor {score_floor}')
@@ -1407,6 +1799,7 @@ def api_scan():
                 'stock_price':round(stock['price'],2),
                 'setup_score':stock['score'],
                 'top_pick':False,
+                'seen_before': sym in _last_scan_tickers,
                 'strategy_type':strat_map.get(regime,'bull_call_spread'),
                 'tags':tags,
                 'expiration':spread['expiration'],'dte':spread['dte'],
@@ -1437,10 +1830,13 @@ def api_scan():
                 'rationale':build_rationale(stock,spread,regime),
                 'ibd_lookup':f'https://research.investors.com/stock-quotes/nasdaq-{sym.lower()}-{sym}.htm',
             })
-            if len(trades)>=5: break
+            if len(trades)>=8: break
 
         if not trades:
             return jsonify({'error':'Found candidates but no valid spreads. Markets may be closed.'})
+
+        # Update the "seen before" memory for the next scan
+        _last_scan_tickers = {t['ticker'] for t in trades}
 
         trades[0]['top_pick']=True
         emit(f'Scan complete — {len(trades)} trade setups ready')
@@ -1451,9 +1847,30 @@ def api_scan():
             'market_status':mkt,'universe_meta':universe_meta,
             'screened':screened,'candidates_found':len(candidates),
         })
+    except ScanCancelled:
+        emit('Scan cancelled')
+        return jsonify({'error': 'Scan cancelled', 'cancelled': True}), 499
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error':str(e)}),500
+    finally:
+        # Always release the scan lock so the next scan can run
+        _scan_running = False
+        _scan_cancel.clear()
+
+@app.route('/api/scan/cancel', methods=['POST'])
+def api_scan_cancel():
+    """Request cancellation of the running scan (if any)."""
+    if _scan_running:
+        _scan_cancel.set()
+        emit('Cancelling scan…')
+        return jsonify({'status': 'cancelling'})
+    return jsonify({'status': 'no_scan_running'})
+
+@app.route('/api/scan/status')
+def api_scan_status():
+    """Report whether a scan is currently running (for reconnecting clients)."""
+    return jsonify({'running': _scan_running})
 
 # ── IBD50 import endpoints ────────────────────────────────────────────────────
 @app.route('/api/ibd50',methods=['GET'])
@@ -1591,7 +2008,8 @@ def api_review():
                 a = o.get('ask', 0) or 0
                 return (b + a) / 2 if (b + a) > 0 else None
 
-            current_value = None
+            current_value    = None
+            underlying_price = None   # will be populated from chain response
 
             if is_condor and exp_date:
                 # Condor: structure is "SELL $Xc / BUY $Yc + SELL $Zp / BUY $Wp"
@@ -1604,6 +2022,7 @@ def api_review():
                                        include_underlying_quote=True, strategy='SINGLE')
                     if resp:
                         chain = resp.json()
+                        underlying_price = chain.get('underlyingPrice')
                         calls = chain.get('callExpDateMap', {})
                         puts  = chain.get('putExpDateMap', {})
                         def find_exp(m):
@@ -1634,6 +2053,7 @@ def api_review():
                                        include_underlying_quote=True, strategy='SINGLE')
                     if resp:
                         chain = resp.json()
+                        underlying_price = chain.get('underlyingPrice')
                         exp_map = chain.get('callExpDateMap' if ct == 'CALL' else 'putExpDateMap', {})
                         for exp_str, strikes_dict in exp_map.items():
                             try:
@@ -1743,6 +2163,7 @@ def api_review():
                 'contracts':     contracts,
                 'entry_date':    entry_date,
                 'current_value': current_value,
+                'underlying_price': round(underlying_price, 2) if underlying_price else None,
                 'pnl':           pnl,
                 'pnl_pct':       pnl_pct,
                 'action':        action,
@@ -1763,7 +2184,7 @@ def refresh_universe_route():
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 def open_browser():
-    time.sleep(1.5); webbrowser.open('http://127.0.0.1:8080')
+    time.sleep(1.5); webbrowser.open(f'http://127.0.0.1:{SERVER_PORT}')
 
 if __name__=='__main__':
     print('\n'+'='*58)
@@ -1787,10 +2208,14 @@ if __name__=='__main__':
 
     print(f'  ✓  Rate limiter: 80 req/min')
 
+    # ── Initialize SQLite storage (creates scanner.db if missing) ───────────
+    init_db()
+    print(f'  ✓  Database ready: {DB_PATH}')
+
     # ── Schwab auth — non-blocking, UI handles OAuth if needed ──────────────
     init_schwab()  # loads token if available, sets _auth_pending if not
 
     # ── Start Flask ───────────────────────────────────────────────────────
-    print(f'\n  Starting scanner at http://127.0.0.1:8080 …\n')
+    print(f'\n  Starting scanner at http://127.0.0.1:{SERVER_PORT} …\n')
     threading.Thread(target=open_browser, daemon=True).start()
-    app.run(debug=False, host='0.0.0.0', port=8080, threaded=True)
+    app.run(debug=False, host='0.0.0.0', port=SERVER_PORT, threaded=True)
