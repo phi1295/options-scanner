@@ -407,16 +407,15 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
     </div>
 
     <div class="auth-title" id="authTitle">Connect to Schwab</div>
-    <div class="auth-desc" id="authDesc">Click the button below to open the Schwab login page. After you approve access, this screen will close automatically.</div>
+    <div class="auth-desc" id="authDesc">Click the button below to get a Schwab login link. It works from any device — this one, your phone, or another computer.</div>
 
     <div class="auth-steps" id="authSteps">
-      <strong style="color:var(--text)">Complete the login in your browser:</strong><br>
-      1. A browser tab should open automatically to Schwab<br>
+      <strong style="color:var(--text)">Complete the login (any device):</strong><br>
+      1. Open the link below in any browser — it doesn't need to be this device<br>
       2. Log in with your Schwab credentials and click <strong style="color:var(--text)">Allow</strong><br>
-      3. You'll be redirected to a page showing a certificate warning — this is normal and safe (it's your own computer)<br>
-      &nbsp;&nbsp;&nbsp;• <strong style="color:var(--text)">Chrome/Edge:</strong> click Advanced → Proceed to 127.0.0.1<br>
-      &nbsp;&nbsp;&nbsp;• <strong style="color:var(--text)">Safari:</strong> click Show Details → visit this website<br>
-      4. Wait for the "Schwab connected" confirmation, then this screen closes automatically
+      3. You'll land on a page that fails to load or shows a certificate warning — that's expected, ignore it<br>
+      4. Copy the FULL address from that browser's address bar (it contains <code>code=</code>)<br>
+      5. Paste it below and click <strong style="color:var(--text)">Complete login</strong>
     </div>
 
     <div class="auth-status-msg" id="authStatusMsg"></div>
@@ -941,22 +940,26 @@ async function checkAuthStatus() {
       btn.disabled = true;
       steps.classList.add('visible');
 
-      if (d.manual_auth_needed && d.manual_auth_url) {
-        // Pi/headless: browser couldn't auto-open. Show the URL so the
-        // user can open it on their Mac/phone and complete the login there.
-        // The Pi's callback server is listening — the redirect comes back
-        // automatically once they approve, with no browser needed on the Pi.
-        btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab callback…';
+      if (d.manual_auth_url) {
+        // Completion happens by pasting the redirect URL back — no local
+        // callback listener involved, so this works regardless of which
+        // device the browser doing the login is on.
+        btn.innerHTML = '<span class="spinner"></span>Waiting for you to complete login…';
         msg.className = 'auth-status-msg pending';
         msg.innerHTML = `
-          <div style="margin-bottom:10px">No browser available on this device. Open this URL on your Mac or phone:</div>
+          <div style="margin-bottom:10px">Open this URL in any browser (Mac, phone, this device — any of them):</div>
           <div class="manual-auth-url" id="manualAuthUrl">${d.manual_auth_url}</div>
-          <button class="manual-auth-copy" onclick="navigator.clipboard.writeText(document.getElementById('manualAuthUrl').textContent).then(()=>this.textContent='Copied!').catch(()=>{})">Copy URL</button>
-          <div style="margin-top:10px;font-size:12px;color:var(--text3)">Log in to Schwab, click Allow, then wait — this screen updates automatically when done.</div>`;
+          <button class="manual-auth-copy" type="button" onclick="navigator.clipboard.writeText(document.getElementById('manualAuthUrl').textContent).then(()=>this.textContent='Copied!').catch(()=>{})">Copy URL</button>
+          <div style="margin:14px 0 6px;font-size:12px;color:var(--text3);text-align:left">After you log in and land on the failed/warning page, paste that page's full address here:</div>
+          <input type="text" id="manualRedirectInput" placeholder="https://127.0.0.1:8182/?code=..."
+                 style="width:100%;box-sizing:border-box;padding:9px 12px;border-radius:var(--rs);border:1px solid var(--border2);background:var(--bg3);color:var(--text);font-family:'DM Mono',monospace;font-size:12px;margin-bottom:8px"
+                 onkeydown="if(event.key==='Enter') submitManualAuth()">
+          <button class="auth-connect-btn" type="button" style="height:40px;font-size:13px" onclick="submitManualAuth()">Complete login</button>
+          <div id="manualAuthMsg" style="margin-top:8px;font-size:12px"></div>`;
       } else {
-        btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
+        btn.innerHTML = '<span class="spinner"></span>Preparing login link…';
         msg.className = 'auth-status-msg pending';
-        msg.textContent = 'Schwab login page should be open in your browser…';
+        msg.textContent = '';
       }
       if (!_authPolling) {
         _authPolling = true;
@@ -994,9 +997,9 @@ async function startAuth() {
   const msg = document.getElementById('authStatusMsg');
   const steps = document.getElementById('authSteps');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Starting login…';
+  btn.innerHTML = '<span class="spinner"></span>Preparing login link…';
   msg.className = 'auth-status-msg pending';
-  msg.textContent = 'Opening Schwab login page…';
+  msg.textContent = '';
   try {
     const r = await fetch('/api/auth/start', {method:'POST'});
     const d = await r.json();
@@ -1008,14 +1011,37 @@ async function startAuth() {
       return;
     }
     steps.classList.add('visible');
-    msg.textContent = 'A Schwab login page opened in your browser. Complete the login there.';
-    btn.innerHTML = '<span class="spinner"></span>Waiting for Schwab login…';
     _authPolling = true;
+    await checkAuthStatus();   // render the URL + paste box immediately, don't wait for the next poll tick
     pollAuthCompletion();
   } catch(e) {
     msg.className = 'auth-status-msg error';
     msg.textContent = e.message;
     btn.disabled = false;
+  }
+}
+
+async function submitManualAuth() {
+  const input = document.getElementById('manualRedirectInput');
+  const out   = document.getElementById('manualAuthMsg');
+  const url   = input ? input.value.trim() : '';
+  if (!url) { if (out) { out.style.color = 'var(--red)'; out.textContent = 'Paste the redirect URL first.'; } return; }
+  if (out) { out.style.color = 'var(--text3)'; out.textContent = 'Completing login…'; }
+  try {
+    const r = await fetch('/api/auth/complete', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({redirect_url: url})
+    });
+    const d = await r.json();
+    if (d.status === 'ok') {
+      if (out) { out.style.color = 'var(--green)'; out.textContent = 'Connected!'; }
+      await checkAuthStatus();
+      checkStatus();
+    } else {
+      if (out) { out.style.color = 'var(--red)'; out.textContent = d.error || 'That link didn\'t work — try again.'; }
+    }
+  } catch(e) {
+    if (out) { out.style.color = 'var(--red)'; out.textContent = e.message; }
   }
 }
 

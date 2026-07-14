@@ -993,6 +993,96 @@ check('AAPL not seen before', 'AAPL' not in _seen, True)
 check('_last_scan_tickers is a set', isinstance(app._last_scan_tickers, set), True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Manual Schwab auth flow (paste-back redirect URL, no callback listener)')
+
+class _FakeAuthContext:
+    def __init__(self, url='https://api.schwabapi.com/v1/oauth/authorize?client_id=test'):
+        self.authorization_url = url
+        self.callback_url = app.CALLBACK_URL
+        self.state = 'teststate'
+
+def _reset_auth_state():
+    app._schwab_client = None
+    app._auth_pending = False
+    app._auth_error = None
+    app._manual_auth_url = None
+    app._pending_auth_context = None
+
+# get_auth_context() only builds a URL locally — no listener, no thread
+_reset_auth_state()
+_fake_ctx = _FakeAuthContext()
+with _mock.patch('schwab.auth.get_auth_context', return_value=_fake_ctx):
+    app._start_manual_auth()
+check('start_manual_auth sets auth_pending',        app._auth_pending, True)
+check('start_manual_auth publishes the auth URL',   app._manual_auth_url, _fake_ctx.authorization_url)
+check('start_manual_auth stores the pending context', app._pending_auth_context is _fake_ctx, True)
+
+# Completing with nothing in flight fails cleanly (no context to exchange against)
+_reset_auth_state()
+ok, err = app._complete_manual_auth('https://127.0.0.1:8182/?code=abc')
+check('complete_manual_auth with no pending flow fails', ok, False)
+check('complete_manual_auth with no pending flow names the fix',
+      'Connect Schwab' in err, True)
+
+# Completing with a valid pending context exchanges the code and connects
+app._pending_auth_context = _FakeAuthContext()
+_fake_client = _mock.MagicMock()
+with _mock.patch('schwab.auth.client_from_received_url', return_value=_fake_client) as _mx:
+    ok, err = app._complete_manual_auth('  https://127.0.0.1:8182/?code=abc123  ')
+check('complete_manual_auth succeeds with a valid redirect URL', ok, True)
+check('complete_manual_auth sets the schwab client',  app._schwab_client is _fake_client, True)
+check('complete_manual_auth clears auth_pending',     app._auth_pending, False)
+check('complete_manual_auth clears the pending context', app._pending_auth_context, None)
+check('complete_manual_auth clears the manual auth URL', app._manual_auth_url, None)
+check('complete_manual_auth strips whitespace before exchange',
+      _mx.call_args[0][3], 'https://127.0.0.1:8182/?code=abc123')
+
+# A stale/reused/garbage redirect URL fails cleanly and resets pending state
+# so the user can just click Connect again rather than getting stuck.
+_reset_auth_state()
+app._pending_auth_context = _FakeAuthContext()
+with _mock.patch('schwab.auth.client_from_received_url', side_effect=Exception('invalid_grant')):
+    ok, err = app._complete_manual_auth('https://127.0.0.1:8182/?code=stale')
+check('complete_manual_auth surfaces exchange failures',   ok, False)
+check('complete_manual_auth resets pending state on failure', app._pending_auth_context, None)
+check('complete_manual_auth does not set a client on failure', app._schwab_client, None)
+
+# ── /api/auth/start and /api/auth/complete routes ──────────────────────────
+_reset_auth_state()
+_auth_client = app.app.test_client()
+
+with _mock.patch('schwab.auth.get_auth_context', return_value=_FakeAuthContext()):
+    _r = _auth_client.post('/api/auth/start')
+_rd = _r.get_json()
+check('/api/auth/start returns started status', _rd['status'], 'started')
+check('/api/auth/start returns the auth_url in the response body',
+      _rd['auth_url'], _FakeAuthContext().authorization_url)
+
+_status = _auth_client.get('/api/auth/status').get_json()
+check('/api/auth/status surfaces manual_auth_url after start',
+      _status['manual_auth_url'] is not None, True)
+check('/api/auth/status flags manual_auth_needed after start',
+      _status['manual_auth_needed'], True)
+
+_r = _auth_client.post('/api/auth/complete', json={})
+check('/api/auth/complete with no url returns 400', _r.status_code, 400)
+
+with _mock.patch('schwab.auth.client_from_received_url', return_value=_mock.MagicMock()):
+    _r = _auth_client.post('/api/auth/complete',
+                           json={'redirect_url': 'https://127.0.0.1:8182/?code=xyz'})
+check('/api/auth/complete succeeds', _r.get_json()['status'], 'ok')
+check('/api/status reflects the new connection',
+      _auth_client.get('/api/status').get_json()['ready'], True)
+
+# Disconnect clears the pending context too, not just the client
+app._pending_auth_context = _FakeAuthContext()
+_r = _auth_client.post('/api/auth/disconnect')
+check('/api/auth/disconnect clears the pending auth context',
+      app._pending_auth_context, None)
+
+_reset_auth_state()
+
+# ══════════════════════════════════════════════════════════════════════════════
 print(f'\n{"="*50}')
 print(f'Results: {PASS} passed, {FAIL} failed')
 if FAIL == 0:

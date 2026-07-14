@@ -126,9 +126,25 @@ sudo systemctl daemon-reload
 sudo systemctl restart scanner.service
 ```
 
-### "could not locate runnable browser" (Schwab auth) — or VNC browser won't open
-The Pi can't auto-open a browser (headless, SSH, or VNC). Use the manual auth
-script — it needs no auto-browser:
+### Schwab auth / "Connect Schwab Account" from your Mac or phone
+The web app's Connect button no longer needs a browser on the Pi at all —
+it never did work reliably that way, since Schwab's callback URL is locked
+to `127.0.0.1`, which only a browser running on the Pi itself could ever
+reach. It now uses a copy/paste flow instead:
+
+1. Open `http://<pi-ip>:8080` from your Mac or phone and click **Connect
+   Schwab Account**.
+2. Click the link it shows — open it in any browser, on any device.
+3. Log in with your Schwab brokerage credentials and click **Allow**.
+4. You'll land on a page that fails to load or shows a certificate
+   warning — that's expected, ignore it.
+5. Copy the full address from that page's address bar (it contains
+   `code=`) and paste it into the box back in the scanner app, then click
+   **Complete login**.
+
+No SSH access is needed for this anymore. If the web server itself won't
+start (so there's no UI to click through), fall back to the terminal
+script, which does the same copy/paste flow:
 ```bash
 cd ~/options-scanner
 source .venv/bin/activate

@@ -91,50 +91,45 @@ Note the IP — you'll use `http://<that-ip>:8080` everywhere.
 
 ## Step 5 — First run + one-time Schwab authentication
 
-The OAuth callback uses `https://127.0.0.1:8182`, which must happen ON the Pi
-itself the first time. The simplest path is to run it with the Pi's own
-desktop/browser available (VNC or a monitor):
+Schwab's OAuth callback URL is locked to `https://127.0.0.1:8182` — but the
+app never actually needs a browser running on the Pi to complete login. The
+web UI's Connect flow works by pasting the resulting redirect URL back in,
+so it works from any device pointed at the Pi, no VNC/monitor/SSH required:
 
-```bash
-cd ~/options-scanner
-source .venv/bin/activate
-python3 app.py
-```
+1. Start the app on the Pi (`python3 app.py`, or as the systemd service).
+2. From your Mac or phone, go to `http://<pi-ip>:8080` and click
+   **Connect Schwab Account**.
+3. Click the link it shows — open it in any browser on any device.
+4. Log in to Schwab and click **Allow**.
+5. You'll land on a page that fails to load or shows a certificate
+   warning for `https://127.0.0.1:8182` — that's expected, ignore it.
+6. Copy the full address-bar URL (it contains `code=...`) and paste it
+   into the box back in the scanner app, then click **Complete login**.
+   The token saves to `schwab_token.json` on the Pi.
 
-Then on the Pi's own browser:
-1. Go to `http://127.0.0.1:8080`
-2. Click **Connect Schwab Account**
-3. Log in to Schwab, approve
-4. Accept the certificate warning for `https://127.0.0.1:8182`
-   (Advanced → Proceed)
-5. Wait for "Schwab connected" — the token saves to `schwab_token.json`
-
-**Headless Pi (no monitor) or VNC where the browser won't open?**
-
-You have two reliable options:
-
-**Option A — Manual auth script (works over VNC/SSH, no auto-browser needed):**
+**If the web server itself won't start** (so there's no UI to click
+through), use the terminal script instead — it does the same copy/paste
+flow over SSH, no auto-browser needed:
 ```bash
 cd ~/options-scanner
 source .venv/bin/activate
 python3 authenticate.py
 ```
-It prints a Schwab URL. Open that URL in ANY browser (the Pi's, your phone, your
-Mac), log in, approve. Your browser redirects to a `127.0.0.1:8182` address that
-won't load a real page (and may show a certificate warning) — that's fine. Copy
-the FULL address-bar URL (it contains `code=...`) and paste it back into the
-script when prompted. It writes `schwab_token.json`, then:
+It prints a Schwab URL. Open that URL in ANY browser, log in, approve, then
+paste the resulting address-bar URL back into the script when prompted. It
+writes `schwab_token.json`, then:
 ```bash
 sudo systemctl restart scanner.service
 ```
 
-**Option B — Copy a token from your Mac.** Authenticate on the Mac (its browser
-opens normally), then copy the token over:
+**Alternative — copy a token from your Mac.** Authenticate on the Mac (its
+browser opens normally), then copy the token over:
 ```bash
 scp /Users/erikbeltran/PycharmProjects/options-scanner/schwab_token.json pi@192.168.1.50:~/options-scanner/
 ```
 The token works on the Pi as long as the same `config.json` credentials are
-present. Re-do either option weekly when the token expires.
+present. Re-authenticate weekly when the token expires (any of the methods
+above).
 
 Once the token exists, the app starts straight into the scanner — no login
 screen — and you can reach it from any device.
@@ -227,8 +222,9 @@ If all that works, you're done. The Pi is now your always-on scanner server.
   it, set `"server_port": <number>` in `config.json` (e.g. `8090`) and restart.
   Then use `http://<pi-ip>:<number>` everywhere. Do NOT change the OAuth
   callback port 8182 — it's registered in your Schwab Developer Portal.
-- **Weekly Schwab re-auth:** the token lasts 7 days. When it expires, either
-  do the browser login again on the Pi, or copy a fresh `schwab_token.json`
+- **Weekly Schwab re-auth:** the token lasts 7 days. When it expires, click
+  **Connect Schwab Account** from any device (see Step 5) — it no longer
+  needs to happen on the Pi itself — or copy a fresh `schwab_token.json`
   from a Mac login.
 - **Backups:** your data is one file. Copy `scanner.db` somewhere safe
   periodically: `scp pi@<pi-ip>:~/options-scanner/scanner.db ~/backups/`

@@ -163,9 +163,11 @@ def schwab_call(fn, *args, retries=3, **kwargs):
 _schwab_client = None
 
 # ── Auth state ───────────────────────────────────────────────────────────────
-_auth_pending = False   # True when login flow is running in background
+_auth_pending = False   # True while a login flow is awaiting the pasted-back redirect URL
 _auth_error   = None    # Last auth error message if any
-_manual_auth_url = None # Set when headless fallback needs user to open a URL manually
+_manual_auth_url = None # The Schwab authorization URL for the user to open
+_pending_auth_context = None # AuthContext (url + oauth state) from get_auth_context(),
+                              # held between /api/auth/start and /api/auth/complete
 
 def get_client():
     """Return existing client."""
@@ -209,107 +211,65 @@ def init_schwab():
     # shows the Connect button. It becomes True only when the user
     # clicks Connect and the login thread actually starts.
 
-def _login_flow_thread():
-    """
-    Runs the Schwab login flow in a background thread.
+def _token_write_func(token, *args, **kwargs):
+    """Write a raw Schwab token dict to disk. Passed to client_from_received_url
+    in place of schwab-py's internal (underscore-private) file-writer helper."""
+    with open(TOKEN_PATH, 'w') as f:
+        json.dump(token, f)
 
-    Primary path: client_from_login_flow auto-opens a browser. Works on Mac
-    or any desktop with Firefox/Chrome available.
-
-    Fallback path (Pi/headless): when no browser is available, builds the
-    auth URL manually, surfaces it through /api/auth/status so the UI can
-    display it, then starts the callback server and waits for the redirect.
-    The user opens the URL on any device, completes login, and the callback
-    comes back to the Pi's port 8182 automatically.
+def _start_manual_auth():
     """
-    global _schwab_client, _auth_pending, _auth_error, _manual_auth_url
-    _manual_auth_url = None
+    Build the Schwab authorization URL for the user to open.
+
+    Schwab's OAuth callback is required to be 127.0.0.1 (schwab-py enforces
+    this), which only a browser running on THIS exact machine could ever
+    reach. Since this app is normally viewed from a phone or another
+    computer, waiting for that callback to arrive here never works. Instead,
+    the user opens the URL wherever their browser lives, logs in, and pastes
+    the resulting (failed-to-load) redirect URL back into the UI —
+    _complete_manual_auth() below exchanges the code it contains for a token
+    directly, with no listener involved at all.
+
+    get_auth_context() only builds a URL string locally (no network call),
+    so this runs synchronously — no background thread needed.
+    """
+    global _auth_pending, _auth_error, _manual_auth_url, _pending_auth_context
+    import schwab
+    _pending_auth_context = schwab.auth.get_auth_context(SCHWAB_KEY, CALLBACK_URL)
+    _manual_auth_url = _pending_auth_context.authorization_url
+    _auth_pending = True
+    _auth_error   = None
+    print('  Auth URL ready — waiting for the redirect URL to be pasted back')
+
+def _complete_manual_auth(redirect_url):
+    """
+    Exchange the pasted-back redirect URL for a token and connect.
+    Returns (ok, error_message).
+    """
+    global _schwab_client, _auth_pending, _auth_error
+    global _manual_auth_url, _pending_auth_context
+    if not _pending_auth_context:
+        return False, 'No login in progress. Click Connect Schwab first.'
     try:
         import schwab
-        print('  Starting Schwab login flow…')
-        # ── Primary: auto-browser flow ────────────────────────────────────
-        try:
-            _schwab_client = schwab.auth.client_from_login_flow(
-                api_key=SCHWAB_KEY,
-                app_secret=SCHWAB_SECRET,
-                callback_url=CALLBACK_URL,
-                token_path=TOKEN_PATH,
-                enforce_enums=False,
-                interactive=False,
-                callback_timeout=300.0,
-            )
-            _auth_pending = False
-            _auth_error   = None
-            print('  ✓ Schwab authentication complete — token saved!')
-            return
-        except Exception as browser_err:
-            err_str = str(browser_err).lower()
-            is_browser_err = any(w in err_str for w in
-                                  ['browser', 'display', 'runnable', 'could not locate'])
-            if not is_browser_err:
-                raise  # different error — re-raise, don't fall through
-            print(f'  ⚠  Auto-browser unavailable ({browser_err})')
-            print('      Falling back to manual flow — surfacing URL in the UI')
-
-        # ── Fallback: headless/Pi flow ────────────────────────────────────
-        # Build the Schwab auth URL and publish it so the UI can display it.
-        # The user opens it on any browser (Mac, phone), completes login, and
-        # the browser is redirected to https://127.0.0.1:8182?code=...
-        # schwab-py's callback server (started by client_from_login_flow
-        # below) catches that redirect without needing a local browser at all.
-        import urllib.parse, secrets as _sec
-        state     = _sec.token_urlsafe(16)
-        auth_url  = (
-            'https://api.schwabapi.com/v1/oauth/authorize'
-            f'?client_id={urllib.parse.quote(SCHWAB_KEY)}'
-            f'&redirect_uri={urllib.parse.quote(CALLBACK_URL)}'
-            '&response_type=code'
-            f'&state={state}'
-        )
-        _manual_auth_url = auth_url
-        # Signal the UI that it needs to show the URL
-        _auth_error = 'MANUAL_AUTH_REQUIRED'
-        print(f'  Auth URL ready (will be shown in the UI)')
-        print(f'  Waiting for Schwab callback on port 8182…')
-
-        # Re-run client_from_login_flow but now the browser has ALREADY been
-        # "opened" by the user on their own device. The library just needs to
-        # listen on port 8182 for the OAuth callback. Passing requested_browser=''
-        # (empty string) prevents it from trying to auto-open a browser again
-        # while still running the callback server.
-        try:
-            _schwab_client = schwab.auth.client_from_login_flow(
-                api_key=SCHWAB_KEY,
-                app_secret=SCHWAB_SECRET,
-                callback_url=CALLBACK_URL,
-                token_path=TOKEN_PATH,
-                enforce_enums=False,
-                interactive=False,
-                callback_timeout=300.0,
-                requested_browser='',  # suppress browser open; we already sent the user there
-            )
-            _manual_auth_url = None
-            _auth_pending = False
-            _auth_error   = None
-            print('  ✓ Manual Schwab authentication complete — token saved!')
-        except Exception as inner_e:
-            # requested_browser='' may not be supported in older schwab-py.
-            # Final fallback: just wait — if the user visits the URL and the
-            # callback server was already started by the first attempt, it may
-            # still complete. Otherwise surface the error clearly.
-            print(f'  ✗ Headless flow error: {inner_e}')
-            _auth_error = (f'Browser unavailable on this machine. '
-                           f'Run authenticate.py from the terminal instead: '
-                           f'python3 authenticate.py')
-            _manual_auth_url = None
-            _auth_pending = False
-
+        _schwab_client = schwab.auth.client_from_received_url(
+            SCHWAB_KEY, SCHWAB_SECRET, _pending_auth_context,
+            redirect_url.strip(), _token_write_func,
+            asyncio=False, enforce_enums=False)
+        _auth_pending = False
+        _auth_error   = None
+        _manual_auth_url = None
+        _pending_auth_context = None
+        print('  ✓ Schwab authentication complete — token saved!')
+        return True, None
     except Exception as e:
-        import traceback; traceback.print_exc()
-        _auth_error   = str(e)
+        print(f'  ✗ Manual auth exchange failed: {e}')
+        _auth_error = ('Could not complete login — that link may be expired '
+                       'or already used. Click Connect Schwab and try again.')
         _auth_pending = False
         _manual_auth_url = None
-        print(f'  ✗ Login flow error: {e}')
+        _pending_auth_context = None
+        return False, str(e)
 
 # ── IBD50 storage — now stores full row data ──────────────────────────────────
 IBD50_PATH = pathlib.Path(__file__).parent / 'ibd50.json'
@@ -854,21 +814,22 @@ def detect_regime(client):
         else:                  signals['momentum']={'value':f'{m10:.1f}% (10d)','signal':'neut'}; votes.append('neutral')
     else: signals['momentum']={'value':'Calculating','signal':'neut'}
 
-    etf_resp=schwab_call(client.get_quotes,['QQQ','IWM'])
-    if etf_resp and spy_df is not None and len(spy_df)>=20:
-        eq=etf_resp.json()
-        qqq_p=eq.get('QQQ',{}).get('quote',{}).get('lastPrice',0)
-        qqq_pc=eq.get('QQQ',{}).get('quote',{}).get('netPercentChangeInDouble',0) or 0
-        spy_pc=(spy_df['close'].values[-1]/spy_df['close'].values[-5]-1)*100 if len(spy_df)>=5 else 0
-        if qqq_p:
-            diff = qqq_pc - spy_pc
-            if diff > 0.5:
-                signals['sector_rotation']={'value':f'Tech leading +{diff:.1f}%','signal':'bull'}; votes.append('bullish')
-            elif diff < -0.5:
-                signals['sector_rotation']={'value':f'Tech lagging {diff:.1f}%','signal':'bear'}; votes.append('bearish')
-            else:
-                signals['sector_rotation']={'value':'Sector rotation balanced','signal':'neut'}; votes.append('neutral')
-        else: signals['sector_rotation']={'value':'Unavailable','signal':'neut'}
+    qqq_df=get_price_history(client,'QQQ',days=30)
+    if qqq_df is not None and len(qqq_df)>=5 and spy_df is not None and len(spy_df)>=20:
+        # Compare QQQ vs SPY over the SAME trailing window (both ~5-session
+        # returns from price history) — a same-day quote % change compared
+        # against a multi-day SPY return would mix timeframes and produce
+        # a meaningless "leading/lagging" figure.
+        qqq_c=qqq_df['close'].values
+        qqq_pc=(qqq_c[-1]/qqq_c[-5]-1)*100
+        spy_pc=(spy_df['close'].values[-1]/spy_df['close'].values[-5]-1)*100
+        diff = qqq_pc - spy_pc
+        if diff > 0.5:
+            signals['sector_rotation']={'value':f'Tech leading +{diff:.1f}%','signal':'bull'}; votes.append('bullish')
+        elif diff < -0.5:
+            signals['sector_rotation']={'value':f'Tech lagging {diff:.1f}%','signal':'bear'}; votes.append('bearish')
+        else:
+            signals['sector_rotation']={'value':'Sector rotation balanced','signal':'neut'}; votes.append('neutral')
     else: signals['sector_rotation']={'value':'Calculating','signal':'neut'}
 
     if spy_df is not None and len(spy_df)>=20:
@@ -1545,41 +1506,52 @@ def save_settings():
 def api_auth_status():
     """Poll this to know if auth is needed / in progress / complete."""
     connected = _schwab_client is not None
-    is_manual = _auth_error == 'MANUAL_AUTH_REQUIRED'
     return jsonify({
         'connected':       connected,
         'auth_pending':    _auth_pending,
-        'auth_error':      _auth_error if not is_manual else None,
+        'auth_error':      _auth_error,
         'needs_auth':      not connected and not _auth_pending,
         'credentials_ok':  bool(SCHWAB_KEY and SCHWAB_SECRET
                                 and 'YOUR_CLIENT_ID' not in SCHWAB_KEY),
-        'manual_auth_url': _manual_auth_url,  # set when browser unavailable on this machine
-        'manual_auth_needed': is_manual,
+        'manual_auth_url': _manual_auth_url,
+        'manual_auth_needed': _auth_pending and _manual_auth_url is not None,
     })
 
 @app.route('/api/auth/start', methods=['POST'])
 def api_auth_start():
-    """Start the browser-based OAuth flow in a background thread."""
-    global _auth_pending, _auth_error
+    """
+    Build the Schwab authorization URL. No callback listener is started —
+    the flow completes when the user pastes the redirect URL back into
+    /api/auth/complete, so this works from any device's browser.
+    """
     if _schwab_client:
         return jsonify({'status': 'already_connected'})
-    if _auth_pending:
-        return jsonify({'status': 'already_pending'})
-    _auth_pending = True
-    _auth_error   = None
-    t = threading.Thread(target=_login_flow_thread, daemon=True)
-    t.start()
-    return jsonify({'status': 'started',
-                    'message': 'A Schwab login page will open in your browser. '
-                               'Log in, approve access, then return here.'})
+    _start_manual_auth()
+    return jsonify({'status': 'started', 'auth_url': _manual_auth_url,
+                    'message': 'Open the link below, log in, then paste the '
+                               'resulting redirect URL back here.'})
+
+@app.route('/api/auth/complete', methods=['POST'])
+def api_auth_complete():
+    """Exchange the pasted-back Schwab redirect URL for a token."""
+    data = request.get_json(silent=True) or {}
+    redirect_url = (data.get('redirect_url') or '').strip()
+    if not redirect_url:
+        return jsonify({'status': 'error', 'error': 'Paste the redirect URL first.'}), 400
+    ok, err = _complete_manual_auth(redirect_url)
+    if ok:
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'error', 'error': err}), 400
 
 @app.route('/api/auth/disconnect', methods=['POST'])
 def api_auth_disconnect():
     """Delete token and reset client — forces re-auth next time."""
-    global _schwab_client, _auth_pending, _auth_error
+    global _schwab_client, _auth_pending, _auth_error, _manual_auth_url, _pending_auth_context
     _schwab_client = None
     _auth_pending  = False
     _auth_error    = None
+    _manual_auth_url = None
+    _pending_auth_context = None
     try: pathlib.Path(TOKEN_PATH).unlink(missing_ok=True)
     except: pass
     return jsonify({'status': 'disconnected'})
