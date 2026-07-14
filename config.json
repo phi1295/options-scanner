@@ -1,6 +1,6 @@
 {
-  "schwab_client_id": "YOUR_CLIENT_ID_HERE",
-  "schwab_client_secret": "YOUR_CLIENT_SECRET_HERE",
+  "schwab_client_id": "2fpHvY5h4bDsn2hBRVdbcGli1AFrajXRWYreD13CSunYaaCP",
+  "schwab_client_secret": "Nx5hKFsOyv3MIGsRxy0UjWMXjzxnR5k80jltSAcDAuBSdF1RGlcBX0HWP2ZXOQC7",
   "server_port": 8080,
   "_note": "Replace the credential values with your Schwab keys. 'server_port' is the port the web app runs on (default 8080) — change it if 8080 is taken. Do NOT change the OAuth callback (8182); it's registered in your Schwab Developer Portal. This file stays on your machine only."
 }
