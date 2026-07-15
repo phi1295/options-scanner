@@ -263,7 +263,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .auth-connect-btn{width:100%;height:50px;background:var(--green);color:#071a10;border:none;border-radius:var(--r);font-size:15px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:10px}
 .auth-connect-btn:hover{opacity:.88}.auth-connect-btn:disabled{opacity:.4;cursor:not-allowed}
 .auth-status-msg{font-size:13px;color:var(--text2);min-height:20px;margin-bottom:16px}
-.manual-auth-url{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:10px 14px;font-family:'DM Mono',monospace;font-size:11px;word-break:break-all;color:var(--text);margin:8px 0;line-height:1.6}
+.manual-auth-url{width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--rs);padding:10px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--text);margin:8px 0;line-height:1.6}
 .manual-auth-copy{padding:7px 14px;background:var(--bd);border:1px solid rgba(96,165,250,.3);border-radius:var(--rs);color:var(--blue);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;margin-top:4px}
 .auth-status-msg.success{color:var(--green)}.auth-status-msg.error{color:var(--red)}.auth-status-msg.pending{color:var(--amber)}
 .auth-steps{background:var(--bg3);border-radius:var(--rs);padding:14px 18px;text-align:left;font-size:13px;color:var(--text2);line-height:2;margin-bottom:20px;display:none}
@@ -948,8 +948,8 @@ async function checkAuthStatus() {
         msg.className = 'auth-status-msg pending';
         msg.innerHTML = `
           <div style="margin-bottom:10px">Open this URL in any browser (Mac, phone, this device — any of them):</div>
-          <div class="manual-auth-url" id="manualAuthUrl">${d.manual_auth_url}</div>
-          <button class="manual-auth-copy" type="button" onclick="navigator.clipboard.writeText(document.getElementById('manualAuthUrl').textContent).then(()=>this.textContent='Copied!').catch(()=>{})">Copy URL</button>
+          <input class="manual-auth-url" id="manualAuthUrl" type="text" readonly value="${d.manual_auth_url}" onclick="this.select()" onfocus="this.select()">
+          <button class="manual-auth-copy" type="button" onclick="copyManualAuthUrl(this)">Copy URL</button>
           <div style="margin:14px 0 6px;font-size:12px;color:var(--text3);text-align:left">After you log in and land on the failed/warning page, paste that page's full address here:</div>
           <input type="text" id="manualRedirectInput" placeholder="https://127.0.0.1:8182/?code=..."
                  style="width:100%;box-sizing:border-box;padding:9px 12px;border-radius:var(--rs);border:1px solid var(--border2);background:var(--bg3);color:var(--text);font-family:'DM Mono',monospace;font-size:12px;margin-bottom:8px"
@@ -1042,6 +1042,31 @@ async function submitManualAuth() {
     }
   } catch(e) {
     if (out) { out.style.color = 'var(--red)'; out.textContent = e.message; }
+  }
+}
+
+function copyManualAuthUrl(btn) {
+  const input = document.getElementById('manualAuthUrl');
+  if (!input) return;
+  input.focus();
+  input.select();
+  const showCopied = () => {
+    const original = 'Copy URL';
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = original; }, 2000);
+  };
+  // navigator.clipboard requires a secure context (HTTPS or localhost) —
+  // this app is typically loaded over plain http://<pi-ip>:8080 from a
+  // phone/Mac, which browsers treat as insecure, so that API is silently
+  // undefined there. Fall back to the older execCommand approach, which
+  // works over plain HTTP. The input is already selected above either way,
+  // so manual copy (Cmd/Ctrl+C) always works as a last resort too.
+  if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(input.value).then(showCopied).catch(() => {
+      if (document.execCommand('copy')) showCopied();
+    });
+  } else if (document.execCommand('copy')) {
+    showCopied();
   }
 }
 
