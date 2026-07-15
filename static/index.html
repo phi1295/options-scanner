@@ -911,6 +911,9 @@ function applyTheme() {
 
 // ── Auth flow ──────────────────────────────────────────────────────
 let _authPolling = false;
+// Guards against re-rendering (and wiping) the paste-back input on every
+// 2s poll tick — only (re-)render when the auth URL actually changes.
+let _renderedManualAuthUrl = null;
 
 async function checkAuthStatus() {
   try {
@@ -932,6 +935,7 @@ async function checkAuthStatus() {
     if (d.connected) {
       screen.classList.remove('visible');
       _authPolling = false;
+      _renderedManualAuthUrl = null;
       return true;
     }
 
@@ -946,20 +950,28 @@ async function checkAuthStatus() {
         // device the browser doing the login is on.
         btn.innerHTML = '<span class="spinner"></span>Waiting for you to complete login…';
         msg.className = 'auth-status-msg pending';
-        msg.innerHTML = `
-          <div style="margin-bottom:10px">Open this URL in any browser (Mac, phone, this device — any of them):</div>
-          <input class="manual-auth-url" id="manualAuthUrl" type="text" readonly value="${d.manual_auth_url}" onclick="this.select()" onfocus="this.select()">
-          <button class="manual-auth-copy" type="button" onclick="copyManualAuthUrl(this)">Copy URL</button>
-          <div style="margin:14px 0 6px;font-size:12px;color:var(--text3);text-align:left">After you log in and land on the failed/warning page, paste that page's full address here:</div>
-          <input type="text" id="manualRedirectInput" placeholder="https://127.0.0.1:8182/?code=..."
-                 style="width:100%;box-sizing:border-box;padding:9px 12px;border-radius:var(--rs);border:1px solid var(--border2);background:var(--bg3);color:var(--text);font-family:'DM Mono',monospace;font-size:12px;margin-bottom:8px"
-                 onkeydown="if(event.key==='Enter') submitManualAuth()">
-          <button class="auth-connect-btn" type="button" style="height:40px;font-size:13px" onclick="submitManualAuth()">Complete login</button>
-          <div id="manualAuthMsg" style="margin-top:8px;font-size:12px"></div>`;
+        // Only (re-)build this box when the URL is new. checkAuthStatus runs
+        // every 2s while polling — rebuilding msg.innerHTML unconditionally
+        // would recreate the paste-back input each time and wipe out
+        // whatever the user had just typed or pasted into it.
+        if (_renderedManualAuthUrl !== d.manual_auth_url) {
+          _renderedManualAuthUrl = d.manual_auth_url;
+          msg.innerHTML = `
+            <div style="margin-bottom:10px">Open this URL in any browser (Mac, phone, this device — any of them):</div>
+            <input class="manual-auth-url" id="manualAuthUrl" type="text" readonly value="${d.manual_auth_url}" onclick="this.select()" onfocus="this.select()">
+            <button class="manual-auth-copy" type="button" onclick="copyManualAuthUrl(this)">Copy URL</button>
+            <div style="margin:14px 0 6px;font-size:12px;color:var(--text3);text-align:left">After you log in and land on the failed/warning page, paste that page's full address here:</div>
+            <input type="text" id="manualRedirectInput" placeholder="https://127.0.0.1:8182/?code=..."
+                   style="width:100%;box-sizing:border-box;padding:9px 12px;border-radius:var(--rs);border:1px solid var(--border2);background:var(--bg3);color:var(--text);font-family:'DM Mono',monospace;font-size:12px;margin-bottom:8px"
+                   onkeydown="if(event.key==='Enter') submitManualAuth()">
+            <button class="auth-connect-btn" type="button" style="height:40px;font-size:13px" onclick="submitManualAuth()">Complete login</button>
+            <div id="manualAuthMsg" style="margin-top:8px;font-size:12px"></div>`;
+        }
       } else {
         btn.innerHTML = '<span class="spinner"></span>Preparing login link…';
         msg.className = 'auth-status-msg pending';
         msg.textContent = '';
+        _renderedManualAuthUrl = null;
       }
       if (!_authPolling) {
         _authPolling = true;
@@ -971,6 +983,7 @@ async function checkAuthStatus() {
     if (d.auth_error) {
       screen.classList.add('visible');
       btn.disabled = false;
+      _renderedManualAuthUrl = null;
       btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Try Again';
       msg.className = 'auth-status-msg error';
       msg.textContent = 'Error: ' + d.auth_error;
