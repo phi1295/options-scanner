@@ -130,7 +130,31 @@ class RateLimiter:
 
 _rl = RateLimiter(80)
 
+# OAuth error codes that mean the refresh token itself is dead (expired,
+# revoked) rather than some transient issue — no amount of retrying fixes these.
+_DEAD_AUTH_ERROR_CODES = {'invalid_grant', 'invalid_token', 'invalid_client', 'unauthorized_client'}
+
+def _is_dead_refresh_token_error(e):
+    """
+    True if `e` is an OAuth token-refresh failure (expired/revoked refresh
+    token) raised by schwab-py/authlib, as opposed to a transient network or
+    API error.
+
+    Schwab access tokens auto-refresh silently using the refresh token —
+    but that refresh token itself expires after ~7 days. When it does, the
+    failure happens INSIDE the client call (schwab-py tries to refresh
+    before the request even goes out) and surfaces as a raised exception,
+    not an HTTP response with a status_code. That means the 401 handling
+    below never sees it. Matched by class name / error code rather than
+    importing authlib's OAuthError directly, so this keeps working even if
+    schwab-py's OAuth dependency internals shift.
+    """
+    if type(e).__name__ in ('OAuthError', 'InvalidGrantError', 'InvalidTokenError', 'TokenExpiredError'):
+        return True
+    return getattr(e, 'error', None) in _DEAD_AUTH_ERROR_CODES
+
 def schwab_call(fn, *args, retries=3, **kwargs):
+    global _schwab_client, _auth_error
     for attempt in range(retries):
         _rl.wait()
         try:
@@ -146,7 +170,6 @@ def schwab_call(fn, *args, retries=3, **kwargs):
                 # dead token again. Clear the client and surface the failure so
                 # the UI shows "needs reconnect" instead of silently looping.
                 print('Token expired (401) — clearing client, user must reconnect')
-                global _schwab_client, _auth_error
                 _schwab_client = None
                 _auth_error = 'Schwab session expired. Please reconnect.'
                 return None
@@ -155,6 +178,11 @@ def schwab_call(fn, *args, retries=3, **kwargs):
             if attempt < retries-1: time.sleep(2**attempt)
             return None
         except Exception as e:
+            if _is_dead_refresh_token_error(e):
+                print(f'Refresh token expired/invalid ({e}) — clearing client, user must reconnect')
+                _schwab_client = None
+                _auth_error = 'Schwab session expired. Please reconnect.'
+                return None
             print(f'Call error (attempt {attempt+1}): {e}')
             if attempt < retries-1: time.sleep(2**attempt)
     return None

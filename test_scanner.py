@@ -792,6 +792,64 @@ app._schwab_client = None
 app._auth_error = None
 
 # ══════════════════════════════════════════════════════════════════════════════
+section('Expired REFRESH token detection (distinct from a per-call 401)')
+from authlib.integrations.base_client import OAuthError
+
+# Schwab access tokens auto-refresh silently using the refresh token, but
+# that refresh token itself expires (~7 days). When it does, schwab-py/authlib
+# raise an OAuthError from INSIDE the client call while trying to refresh —
+# there's no HTTP response/status_code at all, so this never hits the 401
+# branch above. This must be detected too, not just retried as transient.
+
+def _dead_refresh_call(*a, **kw):
+    raise OAuthError('invalid_grant', 'Refresh token expired or revoked')
+
+app._schwab_client = _mock.MagicMock()
+app._auth_error = None
+_result = app.schwab_call(_dead_refresh_call)
+check('dead refresh token returns None',            _result, None)
+check('dead refresh token clears _schwab_client',   app._schwab_client, None)
+check('dead refresh token sets a clear auth_error',
+      app._auth_error, 'Schwab session expired. Please reconnect.')
+
+# /api/status must reflect this too, exactly like the 401 case
+_client_test2 = app.app.test_client()
+_d2 = _client_test2.get('/api/status').get_json()
+check('/api/status ready=False after refresh-token death', _d2['ready'], False)
+check('/api/status surfaces auth_error after refresh-token death',
+      _d2['auth_error'] is not None, True)
+
+# Other dead-auth OAuth error codes are caught the same way
+for _code in ('invalid_token', 'invalid_client', 'unauthorized_client'):
+    app._schwab_client = _mock.MagicMock()
+    app._auth_error = None
+    def _f(*a, _code=_code, **kw): raise OAuthError(_code, 'x')
+    app.schwab_call(_f)
+    check(f'OAuth error "{_code}" clears the client', app._schwab_client, None)
+
+# A genuinely transient error (network blip, not an auth failure) must still
+# retry normally — this fix must not turn every exception into a forced logout.
+_calls = {'n': 0}
+def _flaky_then_ok(*a, **kw):
+    _calls['n'] += 1
+    if _calls['n'] < 2:
+        raise ConnectionError('temporary network blip')
+    class _R:
+        status_code = 200
+        def json(self): return {}
+    return _R()
+
+app._schwab_client = _mock.MagicMock()
+app._auth_error = None
+_result = app.schwab_call(_flaky_then_ok, retries=3)
+check('transient error is retried, not treated as dead auth', _result is not None, True)
+check('transient error does not clear the client', app._schwab_client is not None, True)
+
+# Reset state for any later tests
+app._schwab_client = None
+app._auth_error = None
+
+# ══════════════════════════════════════════════════════════════════════════════
 section('Market status: session recomputes against live clock, hours-only cache')
 from datetime import datetime as _dt, date as _date
 
