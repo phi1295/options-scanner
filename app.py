@@ -22,6 +22,7 @@ except Exception:
 os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 
 from datetime import datetime, timedelta, date
+from typing import Any, Optional, Tuple, List, Dict
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
 import numpy as np
@@ -55,13 +56,19 @@ except (ValueError, TypeError):
 DB_PATH = str(pathlib.Path(__file__).parent / 'scanner.db')
 _db_lock = threading.Lock()
 
-def db_conn():
+def db_conn() -> sqlite3.Connection:
+    """Open a new connection to scanner.db.
+
+    Returns:
+        A connection with WAL journal mode (for safe concurrent reads/writes)
+        and row_factory set to sqlite3.Row so rows can be accessed by column name.
+    """
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')      # safe concurrent reads/writes
     return conn
 
-def init_db():
+def init_db() -> None:
     """Create tables if they don't exist. Safe to call on every startup."""
     with _db_lock, db_conn() as conn:
         conn.execute('''CREATE TABLE IF NOT EXISTS trades (
@@ -100,8 +107,14 @@ _scan_running = False
 _scan_cancel  = threading.Event()
 _last_scan_tickers = set()   # tickers from the previous scan, for "seen before" flagging
 
-def emit(msg, detail=False):
-    """Push a progress message. detail=True = shown only in expanded view."""
+def emit(msg: str, detail: bool = False) -> None:
+    """Push a progress message onto the SSE queue consumed by /api/progress.
+
+    Args:
+        msg: Human-readable progress text shown in the scan progress UI.
+        detail: If True, the message is only shown in the UI's expanded/detail
+            view rather than the main progress line.
+    """
     try:
         _progress_queue.put_nowait({'msg': msg, 'detail': detail})
     except:
@@ -111,18 +124,31 @@ class ScanCancelled(Exception):
     """Raised inside a scan when the user requests cancellation."""
     pass
 
-def check_cancel():
-    """Call at safe points during a scan; raises if cancellation was requested."""
+def check_cancel() -> None:
+    """Call at safe points during a scan; raises if cancellation was requested.
+
+    Raises:
+        ScanCancelled: If /api/scan/cancel has set the cancellation event.
+    """
     if _scan_cancel.is_set():
         raise ScanCancelled()
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 class RateLimiter:
-    def __init__(self, calls_per_minute=80):
+    """Throttles calls to a fixed rate by sleeping just enough between them.
+
+    Used to stay under Schwab's API rate limit — every schwab_call() waits on
+    a shared instance of this before issuing a request.
+    """
+    def __init__(self, calls_per_minute: int = 80):
+        """Args:
+            calls_per_minute: Maximum allowed call rate.
+        """
         self.min_interval = 60.0 / calls_per_minute
         self.last_call    = 0.0
         self._lock        = threading.Lock()
-    def wait(self):
+    def wait(self) -> None:
+        """Block until enough time has elapsed since the last call to stay under the rate limit."""
         with self._lock:
             gap = self.min_interval - (time.time() - self.last_call)
             if gap > 0: time.sleep(gap)
@@ -153,7 +179,26 @@ def _is_dead_refresh_token_error(e):
         return True
     return getattr(e, 'error', None) in _DEAD_AUTH_ERROR_CODES
 
-def schwab_call(fn, *args, retries=3, **kwargs):
+def schwab_call(fn, *args, retries: int = 3, **kwargs) -> Optional[Any]:
+    """Call a schwab-py client method with rate limiting, retries, and auth handling.
+
+    Every Schwab API call in this app should go through here rather than
+    calling the client directly — it centralizes rate limiting (via `_rl`),
+    exponential backoff on transient errors, 429 (rate limit) handling, and
+    401/dead-refresh-token detection that clears the global client so the UI
+    prompts the user to reconnect.
+
+    Args:
+        fn: Bound method on the schwab-py client to call, e.g. `client.get_quotes`.
+        *args: Positional arguments forwarded to `fn`.
+        retries: Number of attempts before giving up on transient failures.
+        **kwargs: Keyword arguments forwarded to `fn`.
+
+    Returns:
+        The successful HTTP response object (status 200), or None if the
+        call ultimately failed, was rate-limited past retries, hit a
+        client error (400/404), or the auth token turned out to be dead.
+    """
     global _schwab_client, _auth_error
     for attempt in range(retries):
         _rl.wait()
@@ -197,12 +242,21 @@ _manual_auth_url = None # The Schwab authorization URL for the user to open
 _pending_auth_context = None # AuthContext (url + oauth state) from get_auth_context(),
                               # held between /api/auth/start and /api/auth/complete
 
-def get_client():
-    """Return existing client."""
+def get_client() -> Optional[Any]:
+    """Return the current Schwab client, or None if not connected.
+
+    Returns:
+        The connected schwab-py client instance, or None if no valid token
+        is loaded (the UI should show the Connect Schwab button in that case).
+    """
     return _schwab_client
 
-def _try_load_token():
-    """Silently load saved token. Returns True if successful."""
+def _try_load_token() -> bool:
+    """Silently load saved token.
+
+    Returns:
+        True if a valid token file was found and loaded into `_schwab_client`.
+    """
     global _schwab_client
     try:
         import schwab
@@ -222,9 +276,9 @@ def _try_load_token():
         except: pass
         return False
 
-def init_schwab():
-    """
-    Called at startup. Loads token if available.
+def init_schwab() -> None:
+    """Called at startup. Loads token if available.
+
     If no token, leaves _auth_pending=False so the UI shows the
     Connect Schwab button (needs_auth state). The login flow only
     starts when the user clicks Connect.
@@ -239,15 +293,23 @@ def init_schwab():
     # shows the Connect button. It becomes True only when the user
     # clicks Connect and the login thread actually starts.
 
-def _token_write_func(token, *args, **kwargs):
-    """Write a raw Schwab token dict to disk. Passed to client_from_received_url
-    in place of schwab-py's internal (underscore-private) file-writer helper."""
+def _token_write_func(token: dict, *args, **kwargs) -> None:
+    """Write a raw Schwab token dict to disk.
+
+    Passed to client_from_received_url in place of schwab-py's internal
+    (underscore-private) file-writer helper.
+
+    Args:
+        token: Token payload returned by the OAuth exchange.
+        *args: Unused; accepted because schwab-py calls this with a fixed
+            positional/keyword signature it controls.
+        **kwargs: Unused, see above.
+    """
     with open(TOKEN_PATH, 'w') as f:
         json.dump(token, f)
 
-def _start_manual_auth():
-    """
-    Build the Schwab authorization URL for the user to open.
+def _start_manual_auth() -> None:
+    """Build the Schwab authorization URL for the user to open.
 
     Schwab's OAuth callback is required to be 127.0.0.1 (schwab-py enforces
     this), which only a browser running on THIS exact machine could ever
@@ -269,10 +331,15 @@ def _start_manual_auth():
     _auth_error   = None
     print('  Auth URL ready — waiting for the redirect URL to be pasted back')
 
-def _complete_manual_auth(redirect_url):
-    """
-    Exchange the pasted-back redirect URL for a token and connect.
-    Returns (ok, error_message).
+def _complete_manual_auth(redirect_url: str) -> Tuple[bool, Optional[str]]:
+    """Exchange the pasted-back redirect URL for a token and connect.
+
+    Args:
+        redirect_url: The (failed-to-load) redirect URL the user pasted back
+            from their browser after completing Schwab login.
+
+    Returns:
+        A (success, error_message) tuple. error_message is None on success.
     """
     global _schwab_client, _auth_pending, _auth_error
     global _manual_auth_url, _pending_auth_context
@@ -303,7 +370,17 @@ def _complete_manual_auth(redirect_url):
 IBD50_PATH = pathlib.Path(__file__).parent / 'ibd50.json'
 _ibd50_data = {}   # symbol -> dict of all IBD fields
 
-def load_ibd50():
+def load_ibd50() -> Dict[str, dict]:
+    """Load the cached IBD50 dataset from ibd50.json into `_ibd50_data`.
+
+    Supports both the legacy format (a bare list of symbols) and the current
+    format (a dict of symbol -> full IBD row), migrating the legacy format
+    on the fly by filling in a default rank of 99.
+
+    Returns:
+        The loaded symbol -> IBD data dict (also stored in the module-level
+        `_ibd50_data`).
+    """
     global _ibd50_data
     if IBD50_PATH.exists():
         with open(IBD50_PATH) as f:
@@ -316,7 +393,13 @@ def load_ibd50():
                 _ibd50_data = {s: {'symbol': s, 'rank': 99} for s in stored['symbols']}
     return _ibd50_data
 
-def save_ibd50(data_dict):
+def save_ibd50(data_dict: Dict[str, dict]) -> None:
+    """Persist a symbol -> IBD data dict to ibd50.json and update the in-memory cache.
+
+    Args:
+        data_dict: Mapping of ticker symbol to its full IBD row data, as
+            produced by `_parse_ibd_rows`.
+    """
     global _ibd50_data
     _ibd50_data = data_dict
     with open(IBD50_PATH, 'w') as f:
@@ -325,20 +408,33 @@ def save_ibd50(data_dict):
 
 load_ibd50()
 
-def ibd50_symbols():
+def ibd50_symbols() -> List[str]:
+    """Return the list of ticker symbols currently loaded from the IBD50 dataset."""
     return list(_ibd50_data.keys())
 
-def ibd50_get(symbol):
+def ibd50_get(symbol: str) -> dict:
     """Return IBD data for a symbol, or empty dict if not in list."""
     return _ibd50_data.get(symbol, {})
 
-def _parse_ibd_rows(df):
-    """Shared row parser for IBD50 DataFrame."""
+def _parse_ibd_rows(df: pd.DataFrame) -> Dict[str, dict]:
+    """Shared row parser for an IBD50 DataFrame (from CSV or converted XLS).
+
+    Args:
+        df: DataFrame with IBD export columns (Symbol, Company Name, Rank,
+            RS Rating, EPS Rating, etc.) — column names as they appear in
+            IBD's raw export.
+
+    Returns:
+        Mapping of ticker symbol -> normalized IBD data dict with numeric
+        fields coerced to float and defaulted where missing.
+    """
     result = {}
     def clean_sym(s):
+        """Normalize a raw cell to an uppercase 1-5 letter ticker, or None if invalid."""
         s = str(s).strip().upper()
         return s if re.match(r'^[A-Z]{1,5}$', s) else None
     def to_num(v, default=None):
+        """Parse a numeric cell (stripping commas/%) to float, or return `default`."""
         try:
             f = float(str(v).replace(',','').replace('%',''))
             return f if not np.isnan(f) else default
@@ -373,8 +469,19 @@ def _parse_ibd_rows(df):
     return result
 
 
-def _find_header_and_parse(text):
-    """Find Symbol/Company header row and parse into DataFrame."""
+def _find_header_and_parse(text: str) -> Dict[str, dict]:
+    """Find the Symbol/Company header row in raw CSV text and parse the rows below it.
+
+    IBD's CSV/XLS exports have a variable number of preamble lines before the
+    actual header row, so the header can't be assumed to be line 0.
+
+    Args:
+        text: Raw CSV text (already decoded / converted from XLS).
+
+    Returns:
+        Mapping of ticker symbol -> IBD data dict, or {} if no Symbol/Company
+        header row was found.
+    """
     lines = text.split('\n')
     header_idx = None
     for i, line in enumerate(lines):
@@ -389,8 +496,12 @@ def _find_header_and_parse(text):
     return _parse_ibd_rows(df)
 
 
-def _find_soffice():
-    """Find LibreOffice soffice binary — handles Mac app bundle and Linux PATH."""
+def _find_soffice() -> Optional[str]:
+    """Find LibreOffice soffice binary — handles Mac app bundle and Linux PATH.
+
+    Returns:
+        Path to the soffice executable, or None if not found.
+    """
     candidates = [
         '/Applications/LibreOffice.app/Contents/MacOS/soffice',  # Mac standard
         '/Applications/LibreOffice.app/Contents/MacOS/soffice.bin',
@@ -407,12 +518,22 @@ def _find_soffice():
     return None
 
 
-def parse_ibd_xls_or_csv(content_bytes, filename=''):
-    """
-    Parse IBD50 export file (XLS, XLSX, or CSV).
-    Converts XLS via LibreOffice, with full error handling.
-    Returns dict of symbol -> full IBD data dict.
-    Raises ValueError with a user-friendly message on failure.
+def parse_ibd_xls_or_csv(content_bytes: bytes, filename: str = '') -> Dict[str, dict]:
+    """Parse an IBD50 export file (XLS, XLSX, or CSV) into IBD data.
+
+    XLS/XLSX files are converted to CSV via LibreOffice first (Schwab-style
+    IBD exports are Excel format), then parsed the same way as a native CSV.
+
+    Args:
+        content_bytes: Raw uploaded file bytes.
+        filename: Original filename, used only to determine the extension.
+
+    Returns:
+        Mapping of ticker symbol -> full IBD data dict.
+
+    Raises:
+        ValueError: With a user-friendly message if LibreOffice is missing,
+            conversion fails, or no IBD data rows are found in the file.
     """
     import tempfile, subprocess as sp, glob
     ext = pathlib.Path(filename).suffix.lower() if filename else ''
@@ -481,18 +602,17 @@ ACC_DIS_SCORES = {'A+':10,'A':9,'A-':8,'B+':7,'B':6,'B-':5,'C+':4,'C':3,'C-':2,'
 SMR_SCORES     = {'A':5,'B':3,'C':1,'D':-2,'E':-5}
 GROUP_SCORES   = {'A+':5,'A':4,'A-':3,'B+':2,'B':1,'B-':0,'C+':0,'C':-1,'C-':-2,'D':-3,'E':-5}
 
-def acc_dis_score(rating):
+def acc_dis_score(rating: str) -> int:
     return ACC_DIS_SCORES.get(str(rating).strip(), 3)
 
-def is_bad_acc_dis(rating):
+def is_bad_acc_dis(rating: str) -> bool:
     return str(rating).strip() in ('D+','D','D-','E')
 
 # ── Market hours ──────────────────────────────────────────────────────────────
 _mkt_cache = {'hours': None, 'date': None}
 
-def market_status(client):
-    """
-    Returns the current market session (pre/regular/after/closed).
+def market_status(client: Any) -> dict:
+    """Return the current options market session (pre/regular/after/closed).
 
     IMPORTANT: the market's hours for today don't change, but the CURRENT
     SESSION does — it must be recomputed against the live clock on every
@@ -501,6 +621,14 @@ def market_status(client):
     until midnight even after the market closed at 4pm. The fix caches
     only the day's hours (the part that's genuinely stable) and always
     re-evaluates now() vs those hours fresh.
+
+    Args:
+        client: Connected schwab-py client used to fetch today's market hours.
+
+    Returns:
+        Dict with `is_open` (bool), `session` (one of pre/regular/after/closed/unknown),
+        and a human-readable `message`. Fails safe to closed/unknown on any
+        Schwab error rather than reporting the market open.
     """
     today = date.today().isoformat()
     if _mkt_cache['date'] == today and _mkt_cache.get('hours'):
@@ -532,8 +660,17 @@ def market_status(client):
         return {'is_open': False, 'session': 'unknown',
                 'message': 'Market hours unavailable — assuming closed until confirmed.'}
 
-def _compute_session(hours):
-    """Compute the CURRENT session against the live clock from cached day-hours."""
+def _compute_session(hours: dict) -> dict:
+    """Compute the CURRENT session against the live clock from cached day-hours.
+
+    Args:
+        hours: Dict with `is_open_today` (bool) and ISO-format `start`/`end`
+            timestamps for today's regular session, as cached by `market_status`.
+
+    Returns:
+        Dict with `is_open` (bool), `session`, and human-readable `message`,
+        same shape as `market_status`'s return value.
+    """
     if not hours.get('is_open_today'):
         return {'is_open': False, 'session': 'closed',
                 'message': 'Options market closed today.'}
@@ -569,8 +706,18 @@ def _compute_session(hours):
 # ── Universe ──────────────────────────────────────────────────────────────────
 _universe_cache = {'symbols':[],'timestamp':None}
 
-def _wiki_tables(url):
-    """Fetch Wikipedia page with browser User-Agent and parse tables."""
+def _wiki_tables(url: str) -> List[pd.DataFrame]:
+    """Fetch a Wikipedia page with a browser User-Agent and parse its HTML tables.
+
+    A browser User-Agent is required — Wikipedia blocks the default Python
+    urllib UA on some pages.
+
+    Args:
+        url: Wikipedia page URL to fetch.
+
+    Returns:
+        List of DataFrames, one per `<table>` element on the page.
+    """
     req = urllib.request.Request(url, headers={
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                       'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -580,8 +727,13 @@ def _wiki_tables(url):
         html = r.read().decode('utf-8')
     return pd.read_html(io.StringIO(html))
 
-def fetch_sp500():
-    """Fetch S&P 500 tickers from Wikipedia with proper User-Agent."""
+def fetch_sp500() -> List[str]:
+    """Fetch current S&P 500 ticker symbols from Wikipedia.
+
+    Returns:
+        List of ticker symbols (dots replaced with dashes, e.g. BRK.B ->
+        BRK-B, matching Schwab's symbol convention), or [] on any fetch error.
+    """
     try:
         tables = _wiki_tables(
             'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
@@ -595,8 +747,13 @@ def fetch_sp500():
     except Exception as e:
         print(f'SP500 error: {e}'); return []
 
-def fetch_nasdaq100():
-    """Fetch Nasdaq 100 tickers from Wikipedia with proper User-Agent."""
+def fetch_nasdaq100() -> List[str]:
+    """Fetch current Nasdaq 100 ticker symbols from Wikipedia.
+
+    Returns:
+        List of ticker symbols (dots replaced with dashes for Schwab's
+        symbol convention), or [] on any fetch error.
+    """
     try:
         tables = _wiki_tables('https://en.wikipedia.org/wiki/Nasdaq-100')
         # Find the table that has Ticker/Symbol column
@@ -622,8 +779,17 @@ FALLBACK = ['AAPL','MSFT','NVDA','META','GOOGL','AMZN','AVGO','AMD','CRM','ORCL'
             'CAT','DE','HON','UNP','LMT','XOM','CVX','COP','SLB',
             'TSLA','NFLX','UBER','ABNB','MELI','CRWD','PLTR']
 
-def get_movers(client):
-    """Get top % gainers. Correct param is sort_order= not sort=."""
+def get_movers(client: Any) -> List[str]:
+    """Get top % gainers across SPX and Nasdaq Composite.
+
+    Note: the schwab-py param is `sort_order=`, not `sort=`.
+
+    Args:
+        client: Connected schwab-py client.
+
+    Returns:
+        Deduplicated list of ticker symbols, or [] on error.
+    """
     try:
         movers = []
         for idx in ['$SPX.X', '$COMPX']:
@@ -645,7 +811,22 @@ def get_movers(client):
     except Exception as e:
         print(f'Movers error: {e}'); return []
 
-def get_universe(client):
+def get_universe(client: Any) -> Tuple[List[str], Dict[str, int]]:
+    """Build the scan universe: IBD50 + today's movers + S&P500/Nasdaq100.
+
+    The S&P500/Nasdaq100 base list is cached for 4 hours (`age < 14400`
+    seconds) since it rarely changes; IBD50 and movers are always fetched
+    fresh and merged in ahead of the base list so they get priority order
+    downstream in `api_scan`.
+
+    Args:
+        client: Connected schwab-py client, used to fetch today's movers.
+
+    Returns:
+        A (symbols, meta) tuple: `symbols` is the deduplicated universe list
+        (IBD50 first, then movers, then base), `meta` is a dict of counts
+        per source (`sp500_ndx`, `ibd50`, `movers`) for display in the UI.
+    """
     global _universe_cache
     now = datetime.now()
     age = (now - _universe_cache['timestamp']).total_seconds() if _universe_cache['timestamp'] else 99999
@@ -666,10 +847,23 @@ def get_universe(client):
     return full, {'sp500_ndx':len(base),'ibd50':len(ibd50),'movers':len(movers)}
 
 # ── Batch quote pre-filter ────────────────────────────────────────────────────
-def batch_quote_filter(client, symbols, chunk_size=50):
-    """
-    Filter symbols by price >= $30 and return a dict of live prices.
-    Returns: (passing_symbols list, live_prices dict {sym: price})
+def batch_quote_filter(client: Any, symbols: List[str], chunk_size: int = 50) -> Tuple[List[str], Dict[str, float]]:
+    """Pre-filter symbols by live price >= $30 using batched quote requests.
+
+    Cheap up-front filter to avoid spending a full `get_price_history` +
+    options chain call on stocks whose options would be too illiquid anyway.
+    A symbol whose quote request fails is passed through rather than dropped,
+    so a transient Schwab error doesn't silently remove candidates.
+
+    Args:
+        client: Connected schwab-py client.
+        symbols: Ticker symbols to filter.
+        chunk_size: Max symbols per `get_quotes` batch request.
+
+    Returns:
+        A (passing_symbols, live_prices) tuple: `passing_symbols` is the
+        subset priced >= $30 (or unresolvable), `live_prices` maps symbol ->
+        last/close price for the symbols that were successfully priced.
     """
     passing = []
     live_prices = {}
@@ -690,7 +884,21 @@ def batch_quote_filter(client, symbols, chunk_size=50):
     return passing, live_prices
 
 # ── Price history ─────────────────────────────────────────────────────────────
-def get_price_history(client, symbol, days=260):
+def get_price_history(client: Any, symbol: str, days: int = 260) -> Optional[pd.DataFrame]:
+    """Fetch ~1 year of daily OHLCV candles for a symbol.
+
+    Args:
+        client: Connected schwab-py client.
+        symbol: Ticker symbol.
+        days: Unused — Schwab's `period_type='year', period='1'` always
+            returns roughly a year of daily candles; kept as a documented
+            parameter for callers' intent even though it isn't passed through.
+
+    Returns:
+        DataFrame of candles sorted by date ascending (columns include
+        `close`, `volume`, `date`), or None if the request failed or
+        returned no candles.
+    """
     try:
         resp = schwab_call(client.get_price_history, symbol,
                            period_type='year',
@@ -706,7 +914,22 @@ def get_price_history(client, symbol, days=260):
         return df.sort_values('date').reset_index(drop=True)
     except: return None
 
-def calc_rs_score(df_stock, df_spy):
+def calc_rs_score(df_stock: pd.DataFrame, df_spy: pd.DataFrame) -> float:
+    """Compute a weighted relative-strength score of a stock versus SPY.
+
+    Blends the stock's excess return over SPY across four trailing windows
+    (63/126/189/252 trading days ≈ 3/6/9/12 months), weighted 40/20/20/20 so
+    the most recent quarter dominates. Used as a raw RS proxy when a stock
+    isn't in the IBD50 dataset (which has real IBD RS Ratings instead).
+
+    Args:
+        df_stock: Stock's price history (must have a `close` column).
+        df_spy: SPY's price history over the same period.
+
+    Returns:
+        Weighted excess-return score (roughly -1 to 1 range); 0 on error or
+        insufficient history.
+    """
     try:
         p=[63,126,189,252]; w=[0.4,0.2,0.2,0.2]
         sc=df_spy['close'].values; stk=df_stock['close'].values
@@ -716,10 +939,23 @@ def calc_rs_score(df_stock, df_spy):
     except: return 0
 
 # ── Multi-factor setup score using IBD data ───────────────────────────────────
-def score_stock(stock, regime):
-    """
-    Comprehensive score using both Schwab price data AND IBD ratings.
-    Range: 0-100
+def score_stock(stock: dict, regime: str) -> int:
+    """Comprehensive setup score using both Schwab price data AND IBD ratings.
+
+    Starts from a base of 40 and adds/subtracts points from IBD factors
+    (rank, RS Rating, Composite, EPS Rating, ACC/DIS, % off high, SMR,
+    volume change, EPS growth, sponsorship) when the stock is in the IBD50
+    dataset, or a price-based RS proxy when it isn't, then layers on
+    regime-dependent momentum/trend adjustments.
+
+    Args:
+        stock: Screened stock dict from `screen_stock` (must include
+            `symbol`, `rs_raw`, `mom10`, `vol_ratio`, `price`, `ma200`).
+        regime: Current market regime ('bullish', 'bearish', 'caution', or
+            'neutral'), as returned by `detect_regime`.
+
+    Returns:
+        Integer score clamped to 0-100.
     """
     s = 40  # base
 
@@ -804,7 +1040,27 @@ def score_stock(stock, regime):
     return max(0, min(100, round(s)))
 
 # ── Regime ────────────────────────────────────────────────────────────────────
-def detect_regime(client):
+def detect_regime(client: Any) -> dict:
+    """Detect the current market regime by voting across five SPY/QQQ/$VIX signals.
+
+    Signals: SPY trend vs its 50/200-day MAs, $VIX level, SPY 10/20-day
+    momentum, QQQ-vs-SPY sector rotation (same trailing window for both, to
+    avoid mixing a same-day quote change against a multi-day return), and
+    SPY short-term trend (breadth proxy). Each signal casts one vote of
+    'bullish'/'bearish'/'caution'/'neutral'; the regime is decided by simple
+    vote thresholds (>=3 bearish votes -> bearish, >=3 bullish -> bullish,
+    mixed/negative-leaning -> caution, otherwise neutral).
+
+    Args:
+        client: Connected schwab-py client, used to fetch SPY/QQQ price
+            history and the $VIX quote.
+
+    Returns:
+        Dict with `regime` (bullish/bearish/caution/neutral), `regime_name`,
+        `regime_desc`, `recommended_strategy` (+ `_short`), `signals` (each
+        signal's display value and bull/bear/warn/neut flag),
+        `protection_note`, `market_context` summary string, and `votes` tally.
+    """
     signals = {}; votes = []
     spy_df = get_price_history(client, 'SPY', days=300)
     spy_price = spy_ma50 = spy_ma200 = None
@@ -884,7 +1140,27 @@ def detect_regime(client):
             'votes':{'bull':bull,'bear':bear,'neutral':neut,'caution':caut}}
 
 # ── Screen stock ──────────────────────────────────────────────────────────────
-def screen_stock(client, symbol, spy_df, regime, live_price=None):
+def screen_stock(client: Any, symbol: str, spy_df: pd.DataFrame, regime: str,
+                  live_price: Optional[float] = None) -> Optional[dict]:
+    """Apply the regime-appropriate trend/price filter and compute raw metrics for one stock.
+
+    Filters out: price < $30 (illiquid options), wrong side of the 50/200-day
+    MAs for the current regime, IBD ACC/DIS D/E ratings in bullish/caution
+    regimes (institutional selling), and IBD % off high > 35% in
+    bullish/caution regimes (too far below highs).
+
+    Args:
+        client: Connected schwab-py client.
+        symbol: Ticker symbol to screen.
+        spy_df: SPY price history, used as the RS benchmark.
+        regime: Current market regime ('bullish', 'bearish', 'caution', or 'neutral').
+        live_price: Live quote price if already fetched (e.g. via
+            `batch_quote_filter`); falls back to the last daily candle close.
+
+    Returns:
+        Dict with `symbol`, `price`, `ma50`, `ma200`, `rs_raw`, `mom10`,
+        `vol_ratio` if the stock passes all filters, else None.
+    """
     try:
         df = get_price_history(client, symbol, days=260)
         if df is None or len(df)<60: return None
@@ -929,7 +1205,22 @@ def screen_stock(client, symbol, spy_df, regime, live_price=None):
     except: return None
 
 # ── Earnings ──────────────────────────────────────────────────────────────────
-def has_earnings_soon(client, symbol, days_ahead=38):
+def has_earnings_soon(client: Any, symbol: str, days_ahead: int = 38) -> Tuple[bool, Optional[str]]:
+    """Check whether a stock's next earnings date falls within the lookahead window.
+
+    Used to skip candidates that would report earnings before the position's
+    30-45 DTE expiration, avoiding unwanted IV-crush/gap risk.
+
+    Args:
+        client: Connected schwab-py client.
+        symbol: Ticker symbol.
+        days_ahead: Number of days from today to check for an upcoming report.
+
+    Returns:
+        A (has_earnings, date_str) tuple: `has_earnings` is True if a report
+        falls in [0, days_ahead] days; `date_str` is the formatted date
+        (e.g. "Jul 24") or None if unavailable.
+    """
     try:
         resp=schwab_call(client.get_instruments,symbols=symbol,projection='fundamental')
         if not resp: return False,None
@@ -943,9 +1234,8 @@ def has_earnings_soon(client, symbol, days_ahead=38):
     except: return False,None
 
 # ── Options chain ────────────────────────────────────────────────────────────
-def get_best_spread(client, symbol, price, regime):
-    """
-    Build the best bull call spread (or bear put spread) for a stock.
+def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Optional[dict]:
+    """Build the best bull call spread (or bear put spread) for a stock.
 
     Key design decisions:
     - Spread width scales with stock price: ~2-3% of stock price
@@ -954,6 +1244,23 @@ def get_best_spread(client, symbol, price, regime):
     - Bid/ask filter: < 20% of mid (percentage, not absolute)
     - Return filter: 25-50% return on debit (matches the enforced check below)
     - No delta filter — price proximity is more reliable given Schwab chain issues
+
+    Searches 30-45 DTE expirations, tries several strike widths around the
+    price-scaled target, and keeps the candidate with the highest
+    return-on-debit (shorter DTE as a tiebreaker within 10%).
+
+    Args:
+        client: Connected schwab-py client.
+        symbol: Ticker symbol.
+        price: Current underlying price, used to scale strike width and
+            target strike selection.
+        regime: Current market regime — 'bullish'/'caution' builds a bull
+            call spread, 'bearish' builds a bear put spread.
+
+    Returns:
+        Dict describing the best spread found (legs, debit, max profit,
+        breakeven, profit target/stop loss, return %, contracts per $10k,
+        Greeks, OI), or None if no spread in the target return band was found.
     """
     try:
         ct = 'CALL' if regime in ('bullish', 'caution') else 'PUT'
@@ -1169,7 +1476,24 @@ def get_best_spread(client, symbol, price, regime):
         print(f'Spread error {symbol}: {e}')
     return None
 
-def get_iron_condor(client, symbol, price):
+def get_iron_condor(client: Any, symbol: str, price: float) -> Optional[dict]:
+    """Build a 4-leg iron condor for a range-bound (neutral-regime) stock.
+
+    Wing width scales with stock price (~1% of price, min $5). Requires
+    30-45 DTE, minimum OI 50 on every leg, and average IV >= 15% (skips
+    stocks with too little premium to be worth selling).
+
+    Args:
+        client: Connected schwab-py client.
+        symbol: Ticker symbol.
+        price: Current underlying price, used to center the short strikes
+            (~5% out from price) and scale wing width.
+
+    Returns:
+        Dict describing the condor (all 4 legs via `condor_legs`, credit
+        collected as `max_profit`, max loss, profit target/stop, return %,
+        contracts per $10k), or None if no valid condor was found.
+    """
     try:
         resp=schwab_call(client.get_option_chain,symbol=symbol,
                          contract_type='ALL',
@@ -1262,10 +1586,11 @@ def get_iron_condor(client, symbol, price):
         print(f'Condor error {symbol}: {e}')
     return None
 
-def calc_position_size(debit, account_size, risk_pct, max_debit_budget=10000,
-                       risk_per_contract_override=None):
-    """
-    Recommend contract count based on risk per trade.
+def calc_position_size(debit: float, account_size: float, risk_pct: float,
+                       max_debit_budget: float = 10000,
+                       risk_per_contract_override: Optional[float] = None) -> dict:
+    """Recommend a contract count based on risk per trade.
+
     Risk per trade    = account_size * risk_pct%
     Risk per contract = stop loss * 100. For a vertical debit spread the stop is
                         50% of debit, so risk/contract = debit * 0.50 * 100.
@@ -1273,6 +1598,21 @@ def calc_position_size(debit, account_size, risk_pct, max_debit_budget=10000,
                         risk_per_contract_override with the true max risk.
     Contracts = risk budget / risk per contract, minimum 1.
     Capped so total capital deployed stays under max_debit_budget.
+
+    Args:
+        debit: Net debit paid per contract for a vertical spread (ignored
+            when `risk_per_contract_override` is given, e.g. for condors).
+        account_size: Total account value used to size risk.
+        risk_pct: Target percent of account to risk on this trade.
+        max_debit_budget: Hard cap on total capital deployed across all
+            recommended contracts.
+        risk_per_contract_override: True max loss per contract in dollars,
+            for structures (like iron condors) where risk isn't 50% of debit.
+
+    Returns:
+        Dict with `contracts`, `dollar_risk`, `pct_of_account`,
+        `total_debit`, and `warning` (set if 1 contract already exceeds 3%
+        of account).
     """
     if debit <= 0 and not risk_per_contract_override:
         return {'contracts':1,'dollar_risk':0,'pct_of_account':0,
@@ -1315,7 +1655,21 @@ def calc_position_size(debit, account_size, risk_pct, max_debit_budget=10000,
             'warning':warning}
 
 # ── Build tags ────────────────────────────────────────────────────────────────
-def build_tags(stock, spread, regime, earn_date, is_ibd):
+def build_tags(stock: dict, spread: dict, regime: str, earn_date: Optional[str],
+                is_ibd: bool) -> List[str]:
+    """Build the short display tags shown on a trade card (IBD rank, MA position, RS, IV, etc).
+
+    Args:
+        stock: Screened stock dict from `screen_stock` (+ `score`).
+        spread: Spread dict from `get_best_spread`/`get_iron_condor`.
+        regime: Current market regime (accepted for a consistent call
+            signature with `build_rationale`; not otherwise used here).
+        earn_date: Formatted upcoming earnings date string, or None.
+        is_ibd: Whether the stock is in the IBD50 dataset.
+
+    Returns:
+        List of short human-readable tag strings for the UI.
+    """
     tags=[]
     ibd=ibd50_get(stock['symbol'])
     if is_ibd:
@@ -1341,7 +1695,23 @@ def build_tags(stock, spread, regime, earn_date, is_ibd):
     return tags
 
 # ── Rationale ────────────────────────────────────────────────────────────────
-def build_rationale(stock, spread, regime):
+def build_rationale(stock: dict, spread: dict, regime: str) -> str:
+    """Build the plain-English rationale paragraph shown on a trade card.
+
+    Prefers real IBD data (rank, RS Rating, Composite, ACC/DIS, % off high,
+    EPS/sales growth) when the stock is in the IBD50 dataset; otherwise
+    falls back to the price-based MA/RS-proxy description and prompts the
+    user to verify RS manually at ibd.com.
+
+    Args:
+        stock: Screened stock dict from `screen_stock` (+ `score`).
+        spread: Spread dict from `get_best_spread`/`get_iron_condor`.
+        regime: Current market regime (accepted for a consistent call
+            signature with `build_tags`; not otherwise used here).
+
+    Returns:
+        Single space-joined rationale string.
+    """
     ibd  = ibd50_get(stock['symbol'])
     parts= []
 
@@ -1385,7 +1755,9 @@ def build_rationale(stock, spread, regime):
 
 # ── Flask routes ──────────────────────────────────────────────────────────────
 @app.route('/')
-def index(): return send_from_directory('static','index.html')
+def index():
+    """Serve the single-page app shell."""
+    return send_from_directory('static','index.html')
 
 @app.route('/manifest.json')
 def manifest():
@@ -1475,6 +1847,7 @@ def update_trade(trade_id):
 
 @app.route('/api/trades/<int:trade_id>', methods=['DELETE'])
 def delete_trade(trade_id):
+    """Delete a single trade by id."""
     with _db_lock, db_conn() as conn:
         conn.execute('DELETE FROM trades WHERE id=?', [trade_id])
         conn.commit()
@@ -1482,6 +1855,7 @@ def delete_trade(trade_id):
 
 @app.route('/api/trades/clear', methods=['POST'])
 def clear_trades():
+    """Delete all trades."""
     with _db_lock, db_conn() as conn:
         conn.execute('DELETE FROM trades')
         conn.commit()
@@ -1512,6 +1886,7 @@ def import_trades():
 # ── Settings storage (account size, risk %) ──────────────────────────────────
 @app.route('/api/settings', methods=['GET'])
 def get_settings():
+    """Return saved settings (account size, risk %), defaulting unset keys."""
     with _db_lock, db_conn() as conn:
         rows = conn.execute('SELECT key, value FROM settings').fetchall()
     out = {r['key']: r['value'] for r in rows}
@@ -1522,6 +1897,7 @@ def get_settings():
 
 @app.route('/api/settings', methods=['POST'])
 def save_settings():
+    """Upsert one or more settings key/value pairs from the request JSON body."""
     s = request.get_json(silent=True) or {}
     with _db_lock, db_conn() as conn:
         for k, v in s.items():
@@ -1586,6 +1962,13 @@ def api_auth_disconnect():
 
 @app.route('/api/status')
 def api_status():
+    """Report overall app readiness: credentials, live token check, market hours, IBD50 summary.
+
+    Proactively verifies the Schwab token still works (via a lightweight
+    quote call) rather than trusting the cached connection state, so a
+    token that died mid-session is reflected immediately instead of only
+    after the daily market-hours cache expires.
+    """
     global _schwab_client
     has_creds = bool(SCHWAB_KEY and SCHWAB_SECRET)
     has_token = pathlib.Path(TOKEN_PATH).exists()
@@ -1618,6 +2001,7 @@ def api_status():
 
 @app.route('/api/regime')
 def api_regime():
+    """Return the current market regime without running a full scan."""
     client=get_client()
     if not client: return jsonify({'error':'Schwab not configured'}),400
     try: return jsonify(detect_regime(client))
@@ -1651,6 +2035,28 @@ def api_progress():
 
 @app.route('/api/scan')
 def api_scan():
+    """Run a full scan: detect regime, build the universe, screen, score, and build spreads.
+
+    Query params:
+        sector: Sector filter key (e.g. 'technology'), or 'all' (default).
+        account: Account size for position sizing (default 10000).
+        risk_pct: Target risk percent per trade for position sizing (default 1.5).
+
+    Pipeline: detect_regime -> get_universe -> batch_quote_filter -> screen up
+    to 60 stocks (IBD50 first, then movers, then S&P500/Nasdaq100, each tier
+    sorted by IBD RS descending for deterministic ordering) -> score and rank
+    candidates -> build a spread (iron condor in neutral regime, vertical
+    otherwise) for the top 20 -> return up to 8 trade setups.
+
+    Only one scan may run at a time (see `_scan_lock`); a concurrent request
+    gets HTTP 409. Progress is streamed separately via `/api/progress`.
+
+    Returns:
+        JSON with `scan_date`, `regime`, `trades` (list of trade setup
+        dicts), `market_context`, `market_status`, `universe_meta`,
+        `screened`, and `candidates_found`. Returns an error JSON (400/500)
+        or `{'cancelled': True}` (HTTP 499) if the scan was cancelled.
+    """
     global _scan_running
     global _last_scan_tickers
 
@@ -1875,6 +2281,7 @@ def api_scan_status():
 # ── IBD50 import endpoints ────────────────────────────────────────────────────
 @app.route('/api/ibd50',methods=['GET'])
 def get_ibd50_route():
+    """Return the currently loaded IBD50 dataset, sorted by rank."""
     updated=None
     if IBD50_PATH.exists():
         with open(IBD50_PATH) as f: updated=json.load(f).get('updated','')
@@ -1883,6 +2290,12 @@ def get_ibd50_route():
 
 @app.route('/api/ibd50', methods=['POST'])
 def update_ibd50_route():
+    """Upload and replace the IBD50 dataset.
+
+    Accepts, in priority order: a multipart file upload (drag-and-drop XLS/
+    CSV), raw file bytes with a `filename` query param, a JSON body with a
+    `symbols` list, or plain-text/CSV ticker symbols.
+    """
     print(f'IBD50 upload: content_type={request.content_type!r} '
           f'files={list(request.files.keys())} content_len={request.content_length}')
     try:
@@ -1989,6 +2402,7 @@ def api_review():
 
             # Helper to read mark for a strike from a strikes_dict
             def _mark_from(sd, strike):
+                """Return the mark (or bid/ask mid) price for the closest strike within tolerance."""
                 tolerance = max(2.6, strike * 0.015)
                 best_key, best_diff = None, 999.0
                 for k in sd:
@@ -2179,11 +2593,17 @@ def api_review():
 
 @app.route('/api/universe/refresh',methods=['POST'])
 def refresh_universe_route():
+    """Invalidate the cached S&P500/Nasdaq100 base universe, forcing a refetch on next scan."""
     _universe_cache['timestamp']=None
     return jsonify({'status':'Cache cleared'})
 
 # ── Launch ────────────────────────────────────────────────────────────────────
-def open_browser():
+def open_browser() -> None:
+    """Open the scanner in the default browser shortly after the server starts.
+
+    The 1.5s delay gives Flask time to bind the port before the browser
+    tries to connect.
+    """
     time.sleep(1.5); webbrowser.open(f'http://127.0.0.1:{SERVER_PORT}')
 
 if __name__=='__main__':
