@@ -202,38 +202,50 @@ def schwab_call(fn, *args, retries: int = 3, **kwargs) -> Optional[Any]:
     global _schwab_client, _auth_error
     for attempt in range(retries):
         _rl.wait()
-        try:
-            resp = fn(*args, **kwargs)
-            if resp.status_code == 200: return resp
-            if resp.status_code == 429:
-                wait = 61 if '429-005' in resp.headers.get('X-RateLimit-Violated','') else 31
-                print(f'Rate limit 429 — waiting {wait}s'); time.sleep(wait); continue
-            if resp.status_code == 401:
-                # The access token is invalid AND the refresh token behind it has
-                # likely expired too (refresh tokens last ~7 days). Re-loading the
-                # same token file can't fix this — it would just load the same
-                # dead token again. Clear the client and surface the failure so
-                # the UI shows "needs reconnect" instead of silently looping.
-                print('Token expired (401) — clearing client, user must reconnect')
-                _schwab_client = None
-                _auth_error = 'Schwab session expired. Please reconnect.'
+        # Flask runs threaded=True, so multiple requests (e.g. the periodic
+        # /api/status poll and a chain lookup) can call schwab_call at the same
+        # time on the same shared _schwab_client. Schwab's refresh tokens are
+        # single-use/rotating: if two threads both see an expired access token
+        # and both refresh concurrently, only one succeeds — the other gets
+        # "invalid_grant" for a refresh token that's actually fine, and gets
+        # misread below as a dead session, forcing a full reauth even though
+        # the other thread just refreshed successfully. Holding this lock for
+        # the whole call (refresh included) serializes them so that can't happen.
+        with _schwab_lock:
+            try:
+                resp = fn(*args, **kwargs)
+                if resp.status_code == 200: return resp
+                if resp.status_code == 429:
+                    wait = 61 if '429-005' in resp.headers.get('X-RateLimit-Violated','') else 31
+                    print(f'Rate limit 429 — waiting {wait}s'); time.sleep(wait); continue
+                if resp.status_code == 401:
+                    # The access token is invalid AND the refresh token behind it has
+                    # likely expired too (refresh tokens last ~7 days). Re-loading the
+                    # same token file can't fix this — it would just load the same
+                    # dead token again. Clear the client and surface the failure so
+                    # the UI shows "needs reconnect" instead of silently looping.
+                    print('Token expired (401) — clearing client, user must reconnect')
+                    _schwab_client = None
+                    _auth_error = 'Schwab session expired. Please reconnect.'
+                    return None
+                if resp.status_code in (400, 404): return None
+                print(f'API {resp.status_code} for {args[:1]}')
+                if attempt < retries-1: time.sleep(2**attempt)
                 return None
-            if resp.status_code in (400, 404): return None
-            print(f'API {resp.status_code} for {args[:1]}')
-            if attempt < retries-1: time.sleep(2**attempt)
-            return None
-        except Exception as e:
-            if _is_dead_refresh_token_error(e):
-                print(f'Refresh token expired/invalid ({e}) — clearing client, user must reconnect')
-                _schwab_client = None
-                _auth_error = 'Schwab session expired. Please reconnect.'
-                return None
-            print(f'Call error (attempt {attempt+1}): {e}')
-            if attempt < retries-1: time.sleep(2**attempt)
+            except Exception as e:
+                if _is_dead_refresh_token_error(e):
+                    print(f'Refresh token expired/invalid ({e}) — clearing client, user must reconnect')
+                    _schwab_client = None
+                    _auth_error = 'Schwab session expired. Please reconnect.'
+                    return None
+                print(f'Call error (attempt {attempt+1}): {e}')
+                if attempt < retries-1: time.sleep(2**attempt)
     return None
 
 # ── Schwab client ─────────────────────────────────────────────────────────────
 _schwab_client = None
+_schwab_lock = threading.Lock()  # serializes schwab_call so concurrent
+                                  # requests can't race a token refresh
 
 # ── Auth state ───────────────────────────────────────────────────────────────
 _auth_pending = False   # True while a login flow is awaiting the pasted-back redirect URL
@@ -305,8 +317,13 @@ def _token_write_func(token: dict, *args, **kwargs) -> None:
             positional/keyword signature it controls.
         **kwargs: Unused, see above.
     """
-    with open(TOKEN_PATH, 'w') as f:
+    # Write via a temp file + rename so a crash/kill mid-write can't leave a
+    # truncated token file behind (which _try_load_token would then delete,
+    # forcing a fresh login for no reason).
+    tmp_path = pathlib.Path(str(TOKEN_PATH) + '.tmp')
+    with open(tmp_path, 'w') as f:
         json.dump(token, f)
+    tmp_path.replace(TOKEN_PATH)
 
 def _start_manual_auth() -> None:
     """Build the Schwab authorization URL for the user to open.
