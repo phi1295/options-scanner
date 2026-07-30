@@ -6,7 +6,7 @@ Options Trade Scanner v4
 Run: python app.py
 """
 
-import os, json, math, time, webbrowser, threading, csv, io, pathlib, re, sqlite3
+import os, json, math, time, webbrowser, threading, csv, io, pathlib, re, sqlite3, subprocess
 import sys
 
 # ── Force UTF-8 output ────────────────────────────────────────────────────────
@@ -263,6 +263,21 @@ def get_client() -> Optional[Any]:
     """
     return _schwab_client
 
+def _token_read_func() -> dict:
+    """Read the raw Schwab token dict from disk.
+
+    Paired with `_token_write_func` below via client_from_access_functions
+    instead of schwab-py's own client_from_token_file, whose internal writer
+    is a plain non-atomic open()+json.dump() — a crash/kill mid-write during
+    any of the ~30-min background refreshes over the following 7 days can
+    truncate the file, which _try_load_token's except block below would then
+    delete, forcing a fresh login well before the refresh token actually
+    expired. Using our atomic writer for every load (not just the initial
+    manual-auth one) keeps that safe for the token's whole lifetime.
+    """
+    with open(TOKEN_PATH, 'rb') as f:
+        return json.load(f)
+
 def _try_load_token() -> bool:
     """Silently load saved token.
 
@@ -274,10 +289,11 @@ def _try_load_token() -> bool:
         import schwab
         if not pathlib.Path(TOKEN_PATH).exists():
             return False
-        _schwab_client = schwab.auth.client_from_token_file(
-            token_path=TOKEN_PATH,
+        _schwab_client = schwab.auth.client_from_access_functions(
             api_key=SCHWAB_KEY,
             app_secret=SCHWAB_SECRET,
+            token_read_func=_token_read_func,
+            token_write_func=_token_write_func,
             enforce_enums=False,
         )
         print('  ✓ Schwab token loaded successfully')
@@ -364,15 +380,33 @@ def _complete_manual_auth(redirect_url: str) -> Tuple[bool, Optional[str]]:
         return False, 'No login in progress. Click Connect Schwab first.'
     try:
         import schwab
-        _schwab_client = schwab.auth.client_from_received_url(
+        # client_from_received_url exchanges the code and writes the token to
+        # disk via _token_write_func, but the client object it hands back is
+        # unusable for the long haul: it builds its OAuth2Client session
+        # without a token_endpoint (schwab-py's auth.py never passes one to
+        # that particular constructor call), so authlib's ensure_active_token()
+        # silently no-ops instead of refreshing once the ~30-min access token
+        # expires — every call after that raises InvalidTokenError until the
+        # user reconnects. client_from_access_functions (used below via
+        # _try_load_token) DOES set token_endpoint, so we throw away this
+        # client and immediately reload the just-written token through that
+        # path instead, giving us one that actually auto-refreshes for the
+        # full 7-day life of the refresh token.
+        schwab.auth.client_from_received_url(
             SCHWAB_KEY, SCHWAB_SECRET, _pending_auth_context,
             redirect_url.strip(), _token_write_func,
             asyncio=False, enforce_enums=False)
+        if not _try_load_token():
+            raise RuntimeError('token written but reload failed')
         _auth_pending = False
         _auth_error   = None
         _manual_auth_url = None
         _pending_auth_context = None
-        print('  ✓ Schwab authentication complete — token saved!')
+        # Confirms the reload above actually picked up a session that will
+        # auto-refresh — should print the real endpoint URL, not None. See
+        # the comment above for why this specifically is what was broken.
+        endpoint = _schwab_client.session.metadata.get('token_endpoint')
+        print(f'  ✓ Schwab authentication complete — token saved! (token_endpoint={endpoint})')
         return True, None
     except Exception as e:
         print(f'  ✗ Manual auth exchange failed: {e}')
@@ -1976,6 +2010,27 @@ def api_auth_disconnect():
     try: pathlib.Path(TOKEN_PATH).unlink(missing_ok=True)
     except: pass
     return jsonify({'status': 'disconnected'})
+
+@app.route('/api/logs')
+def api_logs():
+    """Plain-text tail of the scanner.service journal — lets you check logs
+    from a phone browser instead of SSHing into the Pi.
+
+    ?n=<count> controls how many lines (default 200, capped at 2000). Only
+    works when running under systemd; returns an error message otherwise.
+    """
+    try:
+        n = max(10, min(2000, int(request.args.get('n', 200))))
+    except ValueError:
+        n = 200
+    try:
+        result = subprocess.run(
+            ['journalctl', '-u', 'scanner.service', '-n', str(n), '--no-pager'],
+            capture_output=True, text=True, timeout=10)
+        output = result.stdout + result.stderr
+    except Exception as e:
+        output = f'Could not read journalctl: {e}'
+    return app.response_class(output, mimetype='text/plain; charset=utf-8')
 
 @app.route('/api/status')
 def api_status():
