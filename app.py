@@ -1285,6 +1285,29 @@ def has_earnings_soon(client: Any, symbol: str, days_ahead: int = 38) -> Tuple[b
     except: return False,None
 
 # ── Options chain ────────────────────────────────────────────────────────────
+def norm_iv(raw: Any) -> float:
+    """Normalize a Schwab option `volatility` field to a percent number.
+
+    Schwab's option chain already reports implied volatility scaled as a
+    percent (34.5 means 34.5%), not as a decimal fraction. Multiplying it by
+    100 again is what produced the four-digit IV values on trade cards.
+    Values <= 3 are treated as a decimal fraction so this stays correct if a
+    source ever hands back 0.345 instead.
+
+    Args:
+        raw: The raw `volatility` value from an option chain entry.
+
+    Returns:
+        IV as a percent rounded to 1 decimal, or 0.0 if missing/unparseable.
+    """
+    try:
+        v = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v <= 0:
+        return 0.0
+    return round(v * 100, 1) if v <= 3 else round(v, 1)
+
 def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Optional[dict]:
     """Build the best bull call spread (or bear put spread) for a stock.
 
@@ -1476,7 +1499,7 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Opti
 
                 buy_oi    = buy_o.get('openInterest', 0) or 0
                 sell_oi   = sell_o.get('openInterest', 0) or 0
-                buy_iv    = buy_o.get('volatility', 0) or 0
+                buy_iv    = norm_iv(buy_o.get('volatility', 0))
                 buy_delta = abs(buy_o.get('delta', 0.5) or 0.5)
                 buy_theta = buy_o.get('theta', 0) or 0
                 be        = round(buy_s + nd if regime in ('bullish','caution') else buy_s - nd, 2)
@@ -1496,7 +1519,7 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Opti
                     'contracts_per_10k': contracts,
                     'capital_at_risk': round(contracts * nd * 100),
                     'buy_oi': buy_oi, 'sell_oi': sell_oi,
-                    'iv': round(buy_iv * 100, 1),
+                    'iv': buy_iv,
                     'delta': round(buy_delta, 2),
                     'theta': round(buy_theta, 3),
                 }
@@ -1556,7 +1579,7 @@ def get_iron_condor(client: Any, symbol: str, price: float) -> Optional[dict]:
         if not calls or not puts: return None
         today=date.today()
         def get_mid(sd, strike):
-            """Return (mid_price, oi, iv) for closest strike within tolerance."""
+            """Return (mid_price, oi, iv-as-percent) for closest strike within tolerance."""
             tolerance = max(3.0, price * 0.015)
             best_key, best_diff = None, 999.0
             for k in sd:
@@ -1579,7 +1602,7 @@ def get_iron_condor(client: Any, symbol: str, price: float) -> Optional[dict]:
                 o = opts[0]
                 mark = o.get('mark', 0) or 0
                 mid  = mark if mark > 0 else (o.get('bid',0) + o.get('ask',0)) / 2
-                return mid, o.get('openInterest', 0) or 0, o.get('volatility', 0) or 0
+                return mid, o.get('openInterest', 0) or 0, norm_iv(o.get('volatility', 0))
             return 0, 0, 0
         for exp_str in sorted(calls.keys()):
             try:
@@ -1601,7 +1624,7 @@ def get_iron_condor(client: Any, symbol: str, price: float) -> Optional[dict]:
             sp_m,sp_oi,sp_iv=get_mid(puts.get(exp_str,{}),sp); lp_m,lp_oi,_=get_mid(puts.get(exp_str,{}),lp)
             if min(sc_oi,lc_oi,sp_oi,lp_oi)<50: continue
             avg_iv=(sc_iv+sp_iv)/2
-            if avg_iv>0 and avg_iv<0.15: continue
+            if avg_iv>0 and avg_iv<15: continue  # avg_iv is a percent (see norm_iv)
             nc=round((sc_m-lc_m)+(sp_m-lp_m),2)
             if nc<=0: continue
             # Wing width is $5 for each side
@@ -1632,7 +1655,7 @@ def get_iron_condor(client: Any, symbol: str, price: float) -> Optional[dict]:
                     'entry':nc,'profit_target':pt,'stop_loss':sl,'return_on_debit':rp,
                     'contracts_per_10k':contracts,'capital_at_risk':round(contracts*ml*100),
                     'max_loss_per_contract':round(ml*100,2),
-                    'buy_oi':sc_oi,'sell_oi':sp_oi,'iv':round(avg_iv*100,1),'delta':0,'theta':0}
+                    'buy_oi':sc_oi,'sell_oi':sp_oi,'iv':round(avg_iv,1),'delta':0,'theta':0}
     except Exception as e:
         print(f'Condor error {symbol}: {e}')
     return None
