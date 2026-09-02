@@ -659,6 +659,45 @@ def acc_dis_score(rating: str) -> int:
 def is_bad_acc_dis(rating: str) -> bool:
     return str(rating).strip() in ('D+','D','D-','E')
 
+# ── ATR (display only) ─────────────────────────────────────────────────────────
+# The stop is a flat 50% of debit per the documented exit rules; ATR is
+# shown on the trade card purely as context for how much the underlying
+# normally moves relative to that stop. It does not feed any filter, the
+# stop, or any sizing decision.
+def calc_atr_pct(df: pd.DataFrame, price: float, period: int = 14) -> Optional[float]:
+    """14-day Average True Range as a percent of the current price.
+
+    True Range per bar is max(high-low, |high-prev_close|, |low-prev_close|),
+    which unlike a close-to-close range captures overnight gaps. Displayed on
+    the trade card as context; it does not affect strike, stop or sizing.
+
+    Args:
+        df: Daily candles with `high`, `low`, `close` columns.
+        price: Current price to express the ATR against.
+        period: Lookback in bars (default 14, the conventional ATR window).
+
+    Returns:
+        ATR as a percent of price (e.g. 2.4 for 2.4%), or None if the candles
+        lack high/low data or there isn't enough history.
+    """
+    try:
+        if not {'high', 'low', 'close'}.issubset(df.columns): return None
+        if len(df) < period + 1 or price <= 0: return None
+        high = df['high'].values[-(period+1):]
+        low  = df['low'].values[-(period+1):]
+        close= df['close'].values[-(period+1):]
+        trs = []
+        for i in range(1, len(high)):
+            prev_close = close[i-1]
+            trs.append(max(high[i]-low[i],
+                           abs(high[i]-prev_close),
+                           abs(low[i]-prev_close)))
+        if not trs: return None
+        atr = sum(trs) / len(trs)
+        return round(atr / price * 100, 2)
+    except Exception:
+        return None
+
 # ── Market hours ──────────────────────────────────────────────────────────────
 _mkt_cache = {'hours': None, 'date': None}
 
@@ -1210,7 +1249,7 @@ def screen_stock(client: Any, symbol: str, spy_df: pd.DataFrame, regime: str,
 
     Returns:
         Dict with `symbol`, `price`, `ma50`, `ma200`, `rs_raw`, `mom10`,
-        `vol_ratio` if the stock passes all filters, else None.
+        `vol_ratio`, `atr_pct` if the stock passes all filters, else None.
     """
     try:
         df = get_price_history(client, symbol, days=260)
@@ -1243,6 +1282,8 @@ def screen_stock(client: Any, symbol: str, spy_df: pd.DataFrame, regime: str,
         if 'volume' in df.columns and len(df)>=20:
             avg=df['volume'].values[-20:].mean()
             vol_ratio=df['volume'].values[-1]/avg if avg>0 else 1
+        # ATR% is passed through to the trade card for context only
+        atr_pct=calc_atr_pct(df, price)
 
         # IBD % off High override — skip stocks >35% off high in bullish/caution
         if regime in ('bullish','caution') and ibd:
@@ -1252,7 +1293,8 @@ def screen_stock(client: Any, symbol: str, spy_df: pd.DataFrame, regime: str,
         return {'symbol':symbol,'price':price,
                 'ma50':round(ma50,2) if ma50 else None,
                 'ma200':round(ma200,2) if ma200 else None,
-                'rs_raw':rs_raw,'mom10':mom10,'vol_ratio':vol_ratio}
+                'rs_raw':rs_raw,'mom10':mom10,'vol_ratio':vol_ratio,
+                'atr_pct':atr_pct}
     except: return None
 
 # ── Earnings ──────────────────────────────────────────────────────────────────
@@ -1308,7 +1350,44 @@ def norm_iv(raw: Any) -> float:
         return 0.0
     return round(v * 100, 1) if v <= 3 else round(v, 1)
 
-def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Optional[dict]:
+def prob_beyond(buy_s: float, sell_s: float, buy_delta: float,
+                sell_delta: float, target_price: float) -> float:
+    """Approximate the chance the stock finishes beyond `target_price`.
+
+    |delta| approximates the chance an option finishes in the money, so
+    |delta| at a given strike approximates the chance the stock finishes
+    beyond that strike — in the direction the trade needs, for calls and puts
+    alike. The two legs give us a (strike, |delta|) point each, and every
+    price that matters to a vertical (its breakeven, its profit-target price)
+    sits between the two strikes, so we interpolate between them.
+
+    This is a chord approximation of a convex curve, so it reads slightly low
+    in the middle of the range. That's fine for ranking candidates against
+    each other; it is not a precise probability and shouldn't be presented as
+    one.
+
+    Args:
+        buy_s: Long leg strike.
+        sell_s: Short leg strike.
+        buy_delta: |delta| of the long leg.
+        sell_delta: |delta| of the short leg.
+        target_price: Price to measure the probability of finishing beyond.
+            Clamped into the strike range.
+
+    Returns:
+        Probability in [0.01, 0.99].
+    """
+    lo, hi = (buy_s, sell_s) if buy_s < sell_s else (sell_s, buy_s)
+    d_lo   = buy_delta if buy_s < sell_s else sell_delta
+    d_hi   = sell_delta if buy_s < sell_s else buy_delta
+    if hi <= lo:
+        return max(0.01, min(0.99, buy_delta))
+    t = max(lo, min(hi, target_price))
+    d = d_lo + (t - lo) / (hi - lo) * (d_hi - d_lo)
+    return max(0.01, min(0.99, d))
+
+def get_best_spread(client: Any, symbol: str, price: float, regime: str,
+                    atr_pct: Optional[float] = None) -> Optional[dict]:
     """Build the best bull call spread (or bear put spread) for a stock.
 
     Key design decisions:
@@ -1317,11 +1396,18 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Opti
     - OI filter: both legs need OI >= 10 (retail size)
     - Bid/ask filter: < 20% of mid (percentage, not absolute)
     - Return filter: 25-50% return on debit (matches the enforced check below)
-    - No delta filter — price proximity is more reliable given Schwab chain issues
+    - Strike selection is by price proximity, not delta — Schwab chain deltas
+      are unreliable enough to pick strikes with, but good enough to *score*
+      an already-chosen pair (see the probability estimate below)
 
     Searches 30-45 DTE expirations, tries several strike widths around the
-    price-scaled target, and keeps the candidate with the highest
-    return-on-debit (shorter DTE as a tiebreaker within 10%).
+    price-scaled target, and keeps the candidate with the highest estimated
+    probability of profit, with shorter DTE as the tiebreaker. It used to keep the highest return on debit within a 10-point
+    tolerance; ranking on probability directly prefers the narrower spread
+    when two candidates offer a similar return, and stops the tolerance band
+    from trading probability away for a shorter expiration.
+
+    The stop loss is a flat 50% of debit, per the documented exit rules.
 
     Args:
         client: Connected schwab-py client.
@@ -1330,11 +1416,16 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Opti
             target strike selection.
         regime: Current market regime — 'bullish'/'caution' builds a bull
             call spread, 'bearish' builds a bear put spread.
+        atr_pct: The underlying's 14-day ATR as a percent of price (from
+            `screen_stock`), passed through to the trade card as context.
+            Does not affect strike selection, the stop, or sizing.
 
     Returns:
         Dict describing the best spread found (legs, debit, max profit,
         breakeven, profit target/stop loss, return %, contracts per $10k,
-        Greeks, OI), or None if no spread in the target return band was found.
+        Greeks, OI, and the `pop`/`pop_target`/`breakeven_win_rate`
+        probability fields), or None if no spread in the target return band
+        was found.
     """
     try:
         ct = 'CALL' if regime in ('bullish', 'caution') else 'PUT'
@@ -1501,8 +1592,33 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Opti
                 sell_oi   = sell_o.get('openInterest', 0) or 0
                 buy_iv    = norm_iv(buy_o.get('volatility', 0))
                 buy_delta = abs(buy_o.get('delta', 0.5) or 0.5)
+                sell_delta= abs(sell_o.get('delta', 0.0) or 0.0)
                 buy_theta = buy_o.get('theta', 0) or 0
                 be        = round(buy_s + nd if regime in ('bullish','caution') else buy_s - nd, 2)
+
+                # ── Probability estimates ────────────────────────────────────
+                # Chance of finishing past breakeven — the headline
+                # "probability of profit" for the spread.
+                pop = prob_beyond(buy_s, sell_s, buy_delta, sell_delta, be)
+                # Chance of reaching the price at which the spread is worth the
+                # profit target. That's the outcome the exit rules actually
+                # call a win, so it — not pop — drives expected value.
+                tgt_price  = buy_s + pt if regime in ('bullish','caution') else buy_s - pt
+                pop_target = prob_beyond(buy_s, sell_s, buy_delta, sell_delta, tgt_price)
+
+                # What the payoff structure requires, with no probability model
+                # in it at all: win $(pt-nd), lose $(nd-sl), so you need this
+                # win rate just to break even. With a 50% stop this is set
+                # entirely by the return on debit: a 50% return needs a 50%
+                # win rate, a 25% return needs 66%.
+                #
+                # Deliberately NOT subtracted from `pop` to form an "edge":
+                # `pop` is measured at breakeven while this is measured at the
+                # profit target, so differencing them would imply a precision
+                # neither number has. Shown side by side instead.
+                win_amt  = (pt - nd) * 100
+                loss_amt = (nd - sl) * 100
+                be_win_rate = (loss_amt / (win_amt + loss_amt)) if (win_amt + loss_amt) > 0 else 1.0
                 contracts = max(1, math.floor(10000 / (nd * 100 * 2)))
                 leg       = 'call' if regime in ('bullish','caution') else 'put'
 
@@ -1521,25 +1637,27 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str) -> Opti
                     'buy_oi': buy_oi, 'sell_oi': sell_oi,
                     'iv': buy_iv,
                     'delta': round(buy_delta, 2),
+                    'sell_delta': round(sell_delta, 2),
                     'theta': round(buy_theta, 3),
+                    # Probability / risk fields
+                    'pop': round(pop * 100),
+                    'pop_target': round(pop_target * 100),
+                    'breakeven_win_rate': round(be_win_rate * 100),
+                    'atr_pct': atr_pct,
                 }
-                # Selection logic (return band is 25-50% per strategy):
-                # 1. Among valid results, prefer the highest return on debit
+                # Selection logic (the 25-50% return band still gates entry):
+                # 1. Among valid results, prefer the highest probability of profit
                 # 2. Tiebreak: shorter DTE (less time risk, closes sooner)
                 if best_result is None:
                     best_result = result
-                else:
-                    curr_rp  = best_result['return_on_debit']
-                    curr_dte = best_result['dte']
-                    # Prefer higher return; use shorter DTE as tiebreaker within 10%
-                    if rp > curr_rp + 10:
-                        best_result = result  # meaningfully better return
-                    elif abs(rp - curr_rp) <= 10 and dte < curr_dte:
-                        best_result = result  # similar return, shorter DTE
+                elif result['pop'] > best_result['pop']:
+                    best_result = result
+                elif result['pop'] == best_result['pop'] and dte < best_result['dte']:
+                    best_result = result
 
         if best_result:
-            print(f'  ✓ {symbol}: spread built {best_result["buy_leg"]}/{best_result["sell_leg"]} debit=${best_result["net_debit"]:.2f} return={best_result["return_on_debit"]}%')
-            emit(f'✓ {symbol}: {best_result["buy_leg"]} / {best_result["sell_leg"]} · debit ${best_result["net_debit"]:.2f} · return {best_result["return_on_debit"]}%')
+            print(f'  ✓ {symbol}: spread built {best_result["buy_leg"]}/{best_result["sell_leg"]} debit=${best_result["net_debit"]:.2f} return={best_result["return_on_debit"]}% POP={best_result["pop"]}% needs={best_result["breakeven_win_rate"]}% stop=${best_result["stop_loss"]:.2f}')
+            emit(f'✓ {symbol}: {best_result["buy_leg"]} / {best_result["sell_leg"]} · debit ${best_result["net_debit"]:.2f} · return {best_result["return_on_debit"]}% · POP {best_result["pop"]}%')
         else:
             print(f'  ✗ {symbol}: no valid spread found across all expirations')
             emit(f'✗ {symbol}: no valid spread found', detail=True)
@@ -2143,6 +2261,10 @@ def api_scan():
     candidates -> build a spread (iron condor in neutral regime, vertical
     otherwise) for the top 20 -> return up to 8 trade setups.
 
+    Verticals are chosen by estimated probability of profit rather than raw
+    return on debit. Exit rules (50%-of-max-profit target, 50%-of-debit stop,
+    21 DTE) are unchanged.
+
     Only one scan may run at a time (see `_scan_lock`); a concurrent request
     gets HTTP 409. Progress is streamed separately via `/api/progress`.
 
@@ -2272,7 +2394,8 @@ def api_scan():
                 continue
 
             spread=get_iron_condor(client,sym,stock['price']) if regime=='neutral' \
-                   else get_best_spread(client,sym,stock['price'],regime)
+                   else get_best_spread(client,sym,stock['price'],regime,
+                                        atr_pct=stock.get('atr_pct'))
             if spread is None:
                 print(f'  No valid spread found for {sym}')
                 continue
@@ -2321,6 +2444,11 @@ def api_scan():
                 'open_interest':spread['buy_oi'],
                 'iv':spread.get('iv','—'),'delta':spread.get('delta','—'),
                 'theta':spread.get('theta','—'),
+                # Probability / volatility fields (verticals only; condors omit)
+                'pop':spread.get('pop'),
+                'pop_target':spread.get('pop_target'),
+                'breakeven_win_rate':spread.get('breakeven_win_rate'),
+                'atr_pct':spread.get('atr_pct'),
                 # IBD data for display
                 'ibd_rs':       ibd.get('rs_rating') if ibd else None,
                 'ibd_eps':      ibd.get('eps_rating') if ibd else None,

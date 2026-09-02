@@ -144,7 +144,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
 .metric{background:var(--bg3);border-radius:var(--rs);padding:8px 10px}
 .m-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-family:'DM Mono',monospace;margin-bottom:4px}
-.m-val{font-size:15px;font-weight:500;font-family:'DM Mono',monospace}.m-val.green{color:var(--green)}
+.m-val{font-size:15px;font-weight:500;font-family:'DM Mono',monospace}.m-val.green{color:var(--green)}.prob-row{border-top:1px solid var(--border);padding-top:10px;grid-template-columns:repeat(3,1fr)}
 .levels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
 .level{border-radius:var(--rs);padding:10px 12px}
 .level.entry{background:var(--bd);border:1px solid rgba(96,165,250,.2)}
@@ -1493,6 +1493,18 @@ function renderTrades(data) {
       <div class="level target"><div class="lv-label">Profit target</div><div class="lv-val">$${t.profit_target.toFixed(2)}</div><div class="lv-sub">+${t.return_on_debit}% return</div></div>
       <div class="level stop"><div class="lv-label">Stop loss</div><div class="lv-val">$${t.stop_loss.toFixed(2)}</div><div class="lv-sub">no exceptions</div></div>
     </div>`;
+
+    // Probability row — only verticals carry these fields (condors omit them).
+    // The two percentages are measured on different bases (profit at expiry vs
+    // the target/stop payoff), so they sit side by side rather than being
+    // subtracted into a single "edge" number.
+    if (t.pop != null && t.breakeven_win_rate != null) {
+      html += `<div class="metrics prob-row">
+        <div class="metric"><div class="m-lbl">Prob. of profit</div><div class="m-val">${t.pop}%</div></div>
+        <div class="metric"><div class="m-lbl">Needs to win</div><div class="m-val">${t.breakeven_win_rate}%</div></div>
+        <div class="metric"><div class="m-lbl">Stock ATR</div><div class="m-val">${t.atr_pct != null ? t.atr_pct + '%' : '\u2014'}</div></div>
+      </div>`;
+    }
 
     const recC = t.rec_contracts || 1;
     const recRisk = t.rec_dollar_risk || 0;

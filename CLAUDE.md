@@ -122,9 +122,26 @@ pattern consistent since `test_scanner.py` asserts on regime vote counts directl
 Spread construction (`get_best_spread`, `get_iron_condor`) scales strike width to ~2-3% of
 the underlying price (snapped to a fixed set of width steps), uses mid/mark prices, filters
 on open interest and bid/ask spread, and requires 25-50% return on debit within a 30-45 DTE
-window. Position sizing (`calc_position_size`) is risk-based off account size and a target
-risk % per trade — this is treated as the primary risk control (see README "Key Rules"), so
-changes here deserve extra care and test coverage.
+window. Among the spreads that clear those filters, verticals are ranked by estimated
+probability of profit (`prob_beyond`, which interpolates |delta| between the two legs to
+approximate the chance of finishing past a given price), shorter DTE breaking ties — not by
+return on debit as before. Position sizing (`calc_position_size`) is risk-based off account
+size and a target risk % per trade — this is treated as the primary risk control, so changes
+here deserve extra care and test coverage.
+
+The exit rules are a fixed spec, not tunable heuristics: 50%-of-max-profit target,
+**50%-of-debit stop**, close at 21 DTE, never hold through earnings. They are documented for
+the user in the Setup Guide / Daily Playbook tabs of `static/index.html` (there is no README
+despite older references to one), and that copy is the source of truth. A volatility-scaled
+stop was tried and reverted — "no exceptions" is a discipline rule, and a stop that varies
+per trade is harder to hold to. `calc_atr_pct` survives as display-only context on the trade
+card and must not feed any filter, stop, or sizing decision; `test_scanner.py` asserts no
+stop-scaling helper exists.
+
+Two probability numbers are reported per vertical and are deliberately kept separate rather
+than differenced into an "edge": `pop` is measured at breakeven, `breakeven_win_rate` is the
+win rate the profit-target/stop payoff requires. They sit on different bases, and subtracting
+them would imply precision neither has.
 
 ### Deployment target duality
 

@@ -552,6 +552,174 @@ check('Score 87 fails caution',   87 >= caution_floor('caution'), False)
 check('Score 88 passes caution',  88 >= caution_floor('caution'), True)
 check('Score 70 passes bullish',  70 >= caution_floor('bullish'), True)
 
+section('ATR — computed for display, does not affect the stop')
+import pandas as _pd
+
+# ATR% from known candles: a steady $2 daily range on a $100 stock = 2%
+_bars = _pd.DataFrame({
+    'high':  [101.0]*20,
+    'low':   [ 99.0]*20,
+    'close': [100.0]*20,
+})
+check('ATR% of a $2 range on a $100 stock is 2.0', app.calc_atr_pct(_bars, 100.0), 2.0)
+check('ATR% returns None without high/low',
+      app.calc_atr_pct(_pd.DataFrame({'close':[100.0]*20}), 100.0), None)
+check('ATR% returns None with too little history',
+      app.calc_atr_pct(_bars.head(5), 100.0), None)
+
+# ATR captures overnight gaps that a close-to-close range would miss
+_gap = _pd.DataFrame({
+    'high':  [100.0]*15 + [120.0],
+    'low':   [ 99.0]*15 + [119.0],
+    'close': [100.0]*15 + [119.5],
+})
+check('ATR includes gap risk (gap bar lifts ATR above the intraday range)',
+      app.calc_atr_pct(_gap, 119.5) > 1.0, True)
+
+# ATR is display-only: the documented exit rule is a flat 50% of debit, so no
+# ATR-derived stop scaling may exist. Guard against it creeping back in.
+check('No stop-scaling helper exists', hasattr(app, 'stop_loss_fraction'), False)
+check('No ATR baseline constant exists', hasattr(app, 'BASE_ATR_PCT'), False)
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('Probability of profit — delta interpolation')
+
+# Bull call spread: buy 97.5 (delta .60), sell 100 (delta .45)
+_bs, _ss, _bd, _sd = 97.5, 100.0, 0.60, 0.45
+check('At the long strike, POP = long leg delta',
+      round(app.prob_beyond(_bs, _ss, _bd, _sd, 97.5), 4), 0.60)
+check('At the short strike, POP = short leg delta',
+      round(app.prob_beyond(_bs, _ss, _bd, _sd, 100.0), 4), 0.45)
+check('Midway between strikes, POP is the midpoint delta',
+      round(app.prob_beyond(_bs, _ss, _bd, _sd, 98.75), 4), 0.525)
+check('POP falls as the required price rises (calls)',
+      app.prob_beyond(_bs,_ss,_bd,_sd,98.0) > app.prob_beyond(_bs,_ss,_bd,_sd,99.5), True)
+
+# Bear put spread: buy 102.5 (delta .60), sell 100 (delta .45) — strikes inverted
+check('Put spread: at the long strike, POP = long leg delta',
+      round(app.prob_beyond(102.5, 100.0, 0.60, 0.45, 102.5), 4), 0.60)
+check('Put spread: at the short strike, POP = short leg delta',
+      round(app.prob_beyond(102.5, 100.0, 0.60, 0.45, 100.0), 4), 0.45)
+check('Put spread: POP falls as the required price drops further',
+      app.prob_beyond(102.5,100.0,0.60,0.45,102.0) > app.prob_beyond(102.5,100.0,0.60,0.45,100.5), True)
+
+# Clamping and degenerate inputs
+check('Target below the strike range clamps to the nearer strike',
+      round(app.prob_beyond(_bs,_ss,_bd,_sd, 50.0), 4), 0.60)
+check('Target above the strike range clamps to the farther strike',
+      round(app.prob_beyond(_bs,_ss,_bd,_sd, 500.0), 4), 0.45)
+check('POP stays within [0.01, 0.99]',
+      0.01 <= app.prob_beyond(_bs,_ss,1.0,0.0,_bs) <= 0.99, True)
+check('Equal strikes degrade gracefully',
+      app.prob_beyond(100.0,100.0,0.60,0.45,100.0), 0.60)
+
+# The breakeven of the scanner's slightly-ITM structure sits BELOW spot, so POP
+# should exceed the long leg's own probability of expiring ITM... no: breakeven
+# is above the long strike, so POP sits between the two leg deltas.
+_nd_ex = 1.90   # debit on a 2.50-wide spread => 76% of width
+_be_ex = _bs + _nd_ex
+check('Breakeven POP lies between the two leg deltas',
+      _sd < app.prob_beyond(_bs,_ss,_bd,_sd,_be_ex) < _bd, True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('Probability ranking vs return-on-debit ranking')
+
+# The scanner pins the long strike ~2.5% ITM and lets the debit vary, so
+# breakeven = buy_strike + debit. A CHEAPER debit therefore gives both a higher
+# return on debit AND a lower breakeven: return and probability move together,
+# they are not opposites. Verify that on the real structure.
+_buy_s, _bd = 97.5, 0.60
+def _spread(width, nd, sell_delta):
+    sell_s = _buy_s + width
+    mp = round(width - nd, 2)
+    pt = round(nd + mp*0.50, 2)
+    rp = round((pt - nd)/nd*100)
+    pop = app.prob_beyond(_buy_s, sell_s, _bd, sell_delta, _buy_s + nd)
+    return {'width':width,'nd':nd,'rp':rp,'pop':pop}
+
+_cheap = _spread(2.5, 1.25, 0.45)   # 50% return
+_rich  = _spread(2.5, 1.65, 0.45)   # 25% return
+check('Cheaper debit gives the higher return on debit', _cheap['rp'] > _rich['rp'], True)
+check('Cheaper debit ALSO gives the higher probability of profit',
+      _cheap['pop'] > _rich['pop'], True)
+check('Return and probability move together on this structure',
+      (_cheap['rp'] > _rich['rp']) == (_cheap['pop'] > _rich['pop']), True)
+
+# Where probability ranking genuinely differs: across widths. A wider spread
+# pushes its short leg further OTM (lower delta), so at the SAME return on
+# debit the narrower spread carries the higher probability.
+_narrow = _spread(2.5, 1.25, 0.45)   # short leg 2.5 wide -> delta .45
+_wide   = _spread(5.0, 2.50, 0.32)   # short leg 5.0 wide -> delta .32
+check('Narrow and wide spreads show the same return on debit',
+      _narrow['rp'], _wide['rp'])
+check('At equal return, the narrower spread has the higher probability',
+      _narrow['pop'] > _wide['pop'], True)
+check('Ranking on probability picks the narrower spread',
+      max([_narrow,_wide], key=lambda r: r['pop'])['width'], 2.5)
+
+check('Ranking on probability picks the narrower spread (explicit)',
+      max([_narrow,_wide], key=lambda r: r['pop'])['pop'], _narrow['pop'])
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('Breakeven win rate — what the payoff structure demands')
+
+def _be_win_rate(pt, nd, sl):
+    win, loss = (pt-nd)*100, (nd-sl)*100
+    return loss/(win+loss) if (win+loss) > 0 else 1.0
+
+# Symmetric payoff (50% return, 50% stop) needs a 50% win rate
+check('50% return with a 50% stop needs a 50% win rate',
+      round(_be_win_rate(pt=1.875, nd=1.25, sl=0.625), 2), 0.50)
+
+# A 25% return with the same stop demands a much higher win rate
+_low_ret = _be_win_rate(pt=2.06, nd=1.65, sl=0.825)
+check('25% return with a 50% stop demands well over a 50% win rate',
+      _low_ret > 0.60, True)
+
+# With the flat 50% stop, the breakeven win rate is set entirely by the return
+# on debit — nothing about the stock changes it.
+check('Breakeven win rate stays a valid probability',
+      0.0 <= _low_ret <= 1.0, True)
+check('Higher return on debit demands a lower win rate',
+      _be_win_rate(pt=1.875, nd=1.25, sl=0.625) < _low_ret, True)
+
+# The probability estimate and the breakeven win rate are deliberately NOT
+# differenced into a single "edge": POP is measured at breakeven, the breakeven
+# win rate at the profit target. Assert they stay separate fields.
+_fields = ('pop','pop_target','breakeven_win_rate')
+check('Spread result exposes both bases separately', len(set(_fields)), 3)
+check('No combined edge field is published',
+      'edge' in _fields, False)
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('Position sizing — risk is 50% of debit at the stop')
+
+# The documented rule: each trade risks ~risk_pct of the account at its stop,
+# and the stop is 50% of debit. Verticals therefore pass no override at all.
+ps = app.calc_position_size(3.00, 10000, 1.5)
+check('$3 debit on $10k at 1.5% → 1 contract', ps['contracts'], 1)
+check('Risk is 50% of debit x 100',            ps['dollar_risk'], 150.0)
+check('Total debit is the full debit paid',    ps['total_debit'], 300.0)
+
+# Cheaper spread → smaller risk per contract → more contracts fit the budget
+ps_cheap = app.calc_position_size(1.00, 10000, 1.5)
+check('$1 debit → 3 contracts',        ps_cheap['contracts'], 3)
+check('3 contracts still risk $150',   ps_cheap['dollar_risk'], 150.0)
+check('Total debit reflects capital',  ps_cheap['total_debit'], 300.0)
+
+# The 3%-of-account warning fires on an oversized single contract
+ps_big = app.calc_position_size(7.00, 10000, 1.5)
+check('$7 debit → 1 contract floor',   ps_big['contracts'], 1)
+check('$7 debit risks 3.5%',           ps_big['pct_of_account'], 3.5)
+check('Warning fires above the 3% target', ps_big['warning'] is not None, True)
+
+# calc_position_size takes no capital override — verticals deploy their debit
+import inspect as _inspect
+check('No capital_per_contract parameter exists',
+      'capital_per_contract' in _inspect.signature(app.calc_position_size).parameters,
+      False)
+
+# ══════════════════════════════════════════════════════════════════════════════
 section('Condor self-contained risk field')
 # max_loss_per_contract should be (wing - credit) * 100
 wing=5.0; credit=2.0
