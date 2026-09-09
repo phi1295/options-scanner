@@ -80,8 +80,16 @@ def init_db() -> None:
             exitPrice   REAL, pnl REAL,
             ibd_rs      INTEGER, ibd_score INTEGER,
             is_condor   INTEGER DEFAULT 0,
+            regime      TEXT,
             created_at  TEXT DEFAULT CURRENT_TIMESTAMP
         )''')
+        # Migration for databases created before `regime` existed. The whole
+        # point of the column is to accumulate enough entries to test the
+        # "only trade bullish days" rule against real fills, so an existing
+        # scanner.db must gain it rather than start over.
+        have = {r[1] for r in conn.execute('PRAGMA table_info(trades)')}
+        if 'regime' not in have:
+            conn.execute('ALTER TABLE trades ADD COLUMN regime TEXT')
         conn.execute('''CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY, value TEXT
         )''')
@@ -90,7 +98,7 @@ def init_db() -> None:
 # Columns the trades table accepts — used to filter incoming JSON safely
 _TRADE_COLS = ['id','ticker','company','structure','expiration','entryDate',
                'contracts','debit','target','stop','returnPct','notes','status',
-               'exitPrice','pnl','ibd_rs','ibd_score','is_condor']
+               'exitPrice','pnl','ibd_rs','ibd_score','is_condor','regime']
 
 
 
@@ -1130,16 +1138,103 @@ def score_stock(stock: dict, regime: str) -> int:
     return max(0, min(100, round(s)))
 
 # ── Regime ────────────────────────────────────────────────────────────────────
-def detect_regime(client: Any) -> dict:
-    """Detect the current market regime by voting across five SPY/QQQ/$VIX signals.
+def ma_slope_pct(closes) -> float:
+    """Percent change in a series' 20-day moving average over the last 5 sessions.
 
-    Signals: SPY trend vs its 50/200-day MAs, $VIX level, SPY 10/20-day
-    momentum, QQQ-vs-SPY sector rotation (same trailing window for both, to
-    avoid mixing a same-day quote change against a multi-day return), and
-    SPY short-term trend (breadth proxy). Each signal casts one vote of
-    'bullish'/'bearish'/'caution'/'neutral'; the regime is decided by simple
-    vote thresholds (>=3 bearish votes -> bearish, >=3 bullish -> bullish,
-    mixed/negative-leaning -> caution, otherwise neutral).
+    Replaces the old three-point ``c[-1]>c[-10]>c[-20]`` "breadth" check, which
+    compared three individual closes and so flipped to neutral (or outright
+    bearish) on any single pullback day inside an intact trend. Averaging both
+    endpoints makes this a trend measurement instead of a coin flip.
+
+    Args:
+        closes: Closing prices, oldest first; needs at least 25 values.
+
+    Returns:
+        Percent change of the 20-day MA over 5 sessions, or 0.0 if too short.
+    """
+    if closes is None or len(closes) < 25: return 0.0
+    c = np.asarray(closes, dtype=float)
+    now, prev = c[-20:].mean(), c[-25:-5].mean()
+    return (now/prev - 1)*100 if prev else 0.0
+
+def is_range_bound(closes) -> bool:
+    """Positively confirm a sideways tape — the ONLY thing that yields 'neutral'.
+
+    All three conditions must hold: price within 3% of the 50-day MA, the last
+    20 closes spanning no more than 6% of price, and a flat 20-day MA slope
+    (within +/-0.5%, the same band `ma_slope_pct` uses to abstain, so a
+    range-bound reading can never contradict a directional slope vote).
+
+    This exists because 'neutral' used to be a bare `else` fallback: signals
+    that merely abstained pushed the regime into iron condors without anything
+    ever showing the market was actually range-bound.
+
+    Args:
+        closes: SPY closing prices, oldest first; needs at least 50 values.
+
+    Returns:
+        True if the market is positively range-bound.
+    """
+    if closes is None or len(closes) < 50: return False
+    c = np.asarray(closes, dtype=float)
+    price = c[-1]; ma50 = c[-50:].mean()
+    if not ma50 or not price: return False
+    return bool(abs(price-ma50)/ma50 <= 0.03
+                and (c[-20:].max()-c[-20:].min())/price <= 0.06
+                and abs(ma_slope_pct(c)) <= 0.5)
+
+def regime_from_votes(bull: int, bear: int, caut: int, neut: int,
+                      range_bound: bool) -> str:
+    """Decide the regime from tallied signal votes.
+
+    Split out of `detect_regime` so the thresholds are directly testable
+    without a Schwab client (`test_scanner.py` imports this rather than
+    re-implementing it).
+
+    Five votes are cast in total: SPY trend counts twice — it is the only
+    signal with a real trend basis — while VIX, momentum and the 20-day MA
+    slope count once each.
+
+    Order matters. `neutral` is not a fallback: it fires only when
+    `range_bound` positively confirms a sideways tape. A market with no
+    bearish evidence at all falls through to `bullish` instead of being
+    handed iron condors by default; anything else mixed lands on `caution`.
+
+    The bull and bear sides are deliberately NOT symmetric. Unconfirmed
+    bearish evidence (`bear >= 2 and bull <= 1`) resolves to `caution`, not
+    `bearish` — mounting weakness is a reason to cut size, not a reason to
+    commit to bear put spreads.
+
+    Args:
+        bull: Count of bullish votes.
+        bear: Count of bearish votes.
+        caut: Count of caution votes.
+        neut: Count of abstaining (neutral) votes — tallied for display only.
+        range_bound: Result of `is_range_bound` for SPY.
+
+    Returns:
+        One of 'bullish', 'bearish', 'caution', 'neutral'.
+    """
+    if bear >= 3: return 'bearish'
+    if bull >= 3: return 'bullish'
+    if caut >= 3 or (bear >= 2 and bull <= 1): return 'caution'
+    if range_bound: return 'neutral'
+    if bear == 0 and bull >= 2: return 'bullish'
+    return 'caution'
+
+def detect_regime(client: Any) -> dict:
+    """Detect the current market regime by voting across SPY/QQQ/$VIX signals.
+
+    Four voting signals cast five votes: SPY trend vs its 50/200-day MAs
+    (weighted 2 — the only signal with a real trend basis), the $VIX level,
+    SPY 10/20-day momentum, and the slope of SPY's 20-day MA. QQQ-vs-SPY
+    sector rotation is displayed as context but does NOT vote — it says
+    nothing about whether the market is trending or ranging, and as an equal
+    vote it flipped the regime from day to day.
+
+    `neutral` is not a fallback (see `regime_from_votes`): it requires
+    `is_range_bound` to positively confirm a sideways tape, so signals that
+    abstain no longer push the scanner into iron condors by default.
 
     Args:
         client: Connected schwab-py client, used to fetch SPY/QQQ price
@@ -1153,21 +1248,28 @@ def detect_regime(client: Any) -> dict:
     """
     signals = {}; votes = []
     spy_df = get_price_history(client, 'SPY', days=300)
+    spy_c = spy_df['close'].values if spy_df is not None else None
     spy_price = spy_ma50 = spy_ma200 = None
 
-    if spy_df is not None and len(spy_df) >= 200:
-        c = spy_df['close'].values
-        spy_price,spy_ma50,spy_ma200 = c[-1],c[-50:].mean(),c[-200:].mean()
+    # ── SPY trend — weighted 2 votes ─────────────────────────────────────────
+    if spy_c is not None and len(spy_c) >= 200:
+        spy_price,spy_ma50,spy_ma200 = spy_c[-1],spy_c[-50:].mean(),spy_c[-200:].mean()
         a50,a200 = spy_price>spy_ma50, spy_price>spy_ma200
         if a50 and a200:
-            signals['spy_trend']={'value':f'${spy_price:.0f} above 50d & 200d','signal':'bull'}; votes.append('bullish')
+            signals['spy_trend']={'value':f'${spy_price:.0f} above 50d & 200d','signal':'bull'}; votes += ['bullish']*2
         elif a200:
-            signals['spy_trend']={'value':f'${spy_price:.0f} below 50d','signal':'warn'}; votes.append('caution')
+            signals['spy_trend']={'value':f'${spy_price:.0f} below 50d','signal':'warn'}; votes += ['caution']*2
+        elif a50:
+            # Above the 50d but under the 200d — a recovery attempt, not a
+            # downtrend. The old code fell through to the `else` here and
+            # both mislabelled this "below both MAs" and voted it bearish.
+            signals['spy_trend']={'value':f'${spy_price:.0f} below 200d','signal':'warn'}; votes += ['caution']*2
         else:
-            signals['spy_trend']={'value':f'${spy_price:.0f} below both MAs','signal':'bear'}; votes.append('bearish')
+            signals['spy_trend']={'value':f'${spy_price:.0f} below both MAs','signal':'bear'}; votes += ['bearish']*2
     else:
         signals['spy_trend']={'value':'Unavailable','signal':'neut'}
 
+    # ── VIX — 1 vote ─────────────────────────────────────────────────────────
     vix_resp = schwab_call(client.get_quotes,['$VIX'])
     vix_val  = None
     if vix_resp:
@@ -1181,53 +1283,58 @@ def detect_regime(client: Any) -> dict:
         else: signals['vix']={'value':'Unavailable','signal':'neut'}
     else: signals['vix']={'value':'Unavailable','signal':'neut'}
 
-    if spy_df is not None and len(spy_df)>=20:
-        c=spy_df['close'].values; m10=(c[-1]/c[-10]-1)*100; m20=(c[-1]/c[-20]-1)*100
+    # ── Momentum — 1 vote ────────────────────────────────────────────────────
+    if spy_c is not None and len(spy_c)>=20:
+        m10=(spy_c[-1]/spy_c[-10]-1)*100; m20=(spy_c[-1]/spy_c[-20]-1)*100
         if m10>1 and m20>0:   signals['momentum']={'value':f'+{m10:.1f}% (10d)','signal':'bull'}; votes.append('bullish')
         elif m10<-2 or m20<-3:signals['momentum']={'value':f'{m10:.1f}% (10d)','signal':'bear'}; votes.append('bearish')
         else:                  signals['momentum']={'value':f'{m10:.1f}% (10d)','signal':'neut'}; votes.append('neutral')
     else: signals['momentum']={'value':'Calculating','signal':'neut'}
 
-    qqq_df=get_price_history(client,'QQQ',days=30)
-    if qqq_df is not None and len(qqq_df)>=5 and spy_df is not None and len(spy_df)>=20:
-        # Compare QQQ vs SPY over the SAME trailing window (both ~5-session
-        # returns from price history) — a same-day quote % change compared
-        # against a multi-day SPY return would mix timeframes and produce
-        # a meaningless "leading/lagging" figure.
-        qqq_c=qqq_df['close'].values
-        qqq_pc=(qqq_c[-1]/qqq_c[-5]-1)*100
-        spy_pc=(spy_df['close'].values[-1]/spy_df['close'].values[-5]-1)*100
-        diff = qqq_pc - spy_pc
-        if diff > 0.5:
-            signals['sector_rotation']={'value':f'Tech leading +{diff:.1f}%','signal':'bull'}; votes.append('bullish')
-        elif diff < -0.5:
-            signals['sector_rotation']={'value':f'Tech lagging {diff:.1f}%','signal':'bear'}; votes.append('bearish')
-        else:
-            signals['sector_rotation']={'value':'Sector rotation balanced','signal':'neut'}; votes.append('neutral')
-    else: signals['sector_rotation']={'value':'Calculating','signal':'neut'}
+    # ── 20-day MA slope — 1 vote (replaces the old 3-point breadth check) ────
+    if spy_c is not None and len(spy_c)>=25:
+        slope = ma_slope_pct(spy_c)
+        if slope>0.5:    signals['trend_slope']={'value':f'20d MA +{slope:.1f}%','signal':'bull'}; votes.append('bullish')
+        elif slope<-0.5: signals['trend_slope']={'value':f'20d MA {slope:.1f}%','signal':'bear'}; votes.append('bearish')
+        else:            signals['trend_slope']={'value':f'20d MA flat ({slope:+.1f}%)','signal':'neut'}; votes.append('neutral')
+    else: signals['trend_slope']={'value':'Calculating','signal':'neut'}
 
-    if spy_df is not None and len(spy_df)>=20:
-        c=spy_df['close'].values
-        if c[-1]>c[-10]>c[-20]:   signals['market_breadth']={'value':'Trending higher','signal':'bull'}; votes.append('bullish')
-        elif c[-1]<c[-10]<c[-20]: signals['market_breadth']={'value':'Trending lower','signal':'bear'}; votes.append('bearish')
-        else:                      signals['market_breadth']={'value':'Choppy','signal':'neut'}; votes.append('neutral')
-    else: signals['market_breadth']={'value':'Calculating','signal':'neut'}
+    # ── Sector rotation — DISPLAY ONLY, casts no vote ────────────────────────
+    # Compared over 20 sessions rather than 5: at a one-week horizon the
+    # QQQ-vs-SPY spread is noise. It is shown for context because it never
+    # spoke to trend-vs-range in the first place, which is what the regime
+    # is actually deciding.
+    qqq_df=get_price_history(client,'QQQ',days=30)
+    if qqq_df is not None and len(qqq_df)>=21 and spy_c is not None and len(spy_c)>=21:
+        qqq_c=qqq_df['close'].values
+        diff = (qqq_c[-1]/qqq_c[-21]-1)*100 - (spy_c[-1]/spy_c[-21]-1)*100
+        if diff > 2:
+            signals['sector_rotation']={'value':f'Tech leading +{diff:.1f}%','signal':'bull','vote':False}
+        elif diff < -2:
+            signals['sector_rotation']={'value':f'Tech lagging {diff:.1f}%','signal':'bear','vote':False}
+        else:
+            signals['sector_rotation']={'value':f'Balanced ({diff:+.1f}%)','signal':'neut','vote':False}
+    else: signals['sector_rotation']={'value':'Calculating','signal':'neut','vote':False}
 
     bull=votes.count('bullish'); bear=votes.count('bearish')
     caut=votes.count('caution'); neut=votes.count('neutral')
+    range_bound = is_range_bound(spy_c)
+    regime = regime_from_votes(bull, bear, caut, neut, range_bound)
 
-    if bear>=3:   regime,name,desc,strategy,short,prot=('bearish','Confirmed Downtrend','Market in downtrend. Bear put spreads have the wind at their back.','Bear put spreads','Bear Spreads','Bearish: target weak stocks below MAs. Standard 2–3% risk.')
-    elif bull>=3: regime,name,desc,strategy,short,prot=('bullish','Confirmed Uptrend','Market in healthy uptrend. Momentum setups are working.','Bull call spreads','Bull Spreads','Bullish: target strong stocks above both MAs. Standard 2–3% risk.')
-    elif caut>=2 or (bear>=2 and bull<=1): regime,name,desc,strategy,short,prot=('caution','Mixed / Caution','Conflicting signals. Protect capital first.','Reduced size or wait','Caution','Caution: cut size in half. Only trade setups scoring 88+.')
-    else: regime,name,desc,strategy,short,prot=('neutral','Range-Bound / Neutral','No clear trend. Iron condors collect premium.','Iron condors','Iron Condors','Neutral: sell condors on range-bound stocks with elevated IV.')
+    if regime=='bearish':   name,desc,strategy,short,prot=('Confirmed Downtrend','Market in downtrend. Bear put spreads have the wind at their back.','Bear put spreads','Bear Spreads','Bearish: target weak stocks below MAs. Standard 2–3% risk.')
+    elif regime=='bullish': name,desc,strategy,short,prot=('Confirmed Uptrend','Market in healthy uptrend. Momentum setups are working.','Bull call spreads','Bull Spreads','Bullish: target strong stocks above both MAs. Standard 2–3% risk.')
+    elif regime=='caution': name,desc,strategy,short,prot=('Mixed / Caution','Conflicting signals. Protect capital first.','Reduced size or wait','Caution','Caution: cut size in half. Only trade setups scoring 88+.')
+    else:                   name,desc,strategy,short,prot=('Range-Bound / Neutral','SPY pinned near its 50d MA in a tight range. Iron condors collect premium.','Iron condors','Iron Condors','Neutral: sell condors on range-bound stocks with elevated IV.')
 
     spy_s=f'SPY ${spy_price:.0f}' if spy_price else 'SPY loading'
     vix_s=f'VIX {vix_val:.1f}' if vix_val else 'VIX loading'
+    cast=len(votes) or 5
     return {'regime':regime,'regime_name':name,'regime_desc':desc,
             'recommended_strategy':strategy,'recommended_strategy_short':short,
             'signals':signals,'protection_note':prot,
-            'market_context':f'{spy_s} · {vix_s} · {bull}/5 bullish · {bear}/5 bearish · Strategy: {strategy}',
-            'votes':{'bull':bull,'bear':bear,'neutral':neut,'caution':caut}}
+            'market_context':f'{spy_s} · {vix_s} · {bull}/{cast} bullish · {bear}/{cast} bearish · Strategy: {strategy}',
+            'votes':{'bull':bull,'bear':bear,'neutral':neut,'caution':caut,
+                     'range_bound':range_bound}}
 
 # ── Screen stock ──────────────────────────────────────────────────────────────
 def screen_stock(client: Any, symbol: str, spy_df: pd.DataFrame, regime: str,

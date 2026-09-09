@@ -64,7 +64,7 @@ calls it and renders the response) unless the change is backend-only logic cover
 
 ### Request flow for a scan (`GET /api/scan`)
 
-`detect_regime()` (SPY/QQQ/$VIX signal voting) → `get_universe()` (IBD50 + S&P500 +
+`detect_regime()` (SPY/$VIX signal voting) → `get_universe()` (IBD50 + S&P500 +
 Nasdaq100 + movers) → `batch_quote_filter()` (cheap price prefilter) → `screen_stock()` per
 symbol (up to 60, IBD50-first ordering for determinism) → `score_stock()` (IBD factors when
 available, price-based RS proxy otherwise) → `get_best_spread()` / `get_iron_condor()` for
@@ -111,13 +111,31 @@ Pi) is a supported way to transfer an active session.
 
 ### Market regime and scoring model
 
-`detect_regime()` casts one vote per signal (SPY trend vs 50/200-day MA, $VIX level, SPY
-10/20-day momentum, QQQ-vs-SPY sector rotation over matched trailing windows, SPY
-short-term trend as a breadth proxy) and decides the regime by simple vote thresholds. The
-regime determines both the recommended strategy (bull call spread / bear put spread / iron
-condor) and scoring weights in `score_stock()`. This voting/threshold design is deliberately
-simple and explicit — if changing thresholds or adding signals, keep the vote-counting
-pattern consistent since `test_scanner.py` asserts on regime vote counts directly.
+`detect_regime()` tallies **five votes across four signals**: SPY trend vs its 50/200-day
+MAs (weighted **2** — the only signal with a real trend basis), $VIX level, SPY 10/20-day
+momentum, and `ma_slope_pct()` (the 20-day MA's change over 5 sessions). QQQ-vs-SPY sector
+rotation is computed and displayed but **casts no vote** — it never spoke to trend-vs-range,
+and as an equal vote it flipped the regime day to day. The thresholds live in
+`regime_from_votes()`, split out so `test_scanner.py` imports and tests the real code rather
+than re-implementing it (the old test kept a private copy that passed regardless of `app.py`).
+
+`neutral` is **not** a fallback branch. It fires only when `is_range_bound()` positively
+confirms a sideways tape (SPY within 3% of its 50-day MA, a ≤6% 20-day close range, and a
+flat 20-day MA slope). This is the crux of the design: previously an `else` produced
+"range-bound → iron condors" whenever fewer than three signals happened to be actively
+bullish, so signals that merely *abstained* pushed the scanner into condors — it called
+range-bound on 20% of sessions where SPY was above both MAs with VIX under 20, a third of
+those with zero bearish votes at all. Do not reintroduce a bare `else` for `neutral`.
+
+The bull and bear sides are deliberately asymmetric: `bear >= 2 and bull <= 1` resolves to
+`caution`, never `bearish`. Mounting weakness is a reason to cut size, not to commit to bear
+put spreads. A bearish mirror of the "no opposing evidence → trend" rule would be dead code.
+
+The regime determines both the recommended strategy (bull call spread / bear put spread /
+iron condor) and scoring weights in `score_stock()`. If adding signals, keep the vote-tally
+pattern and prefer averaged/multi-point measurements over single-close comparisons —
+`market_breadth`'s old `c[-1]>c[-10]>c[-20]` check abstained on ~48% of sessions and voted
+outright bearish inside intact uptrends.
 
 Spread construction (`get_best_spread`, `get_iron_condor`) scales strike width to ~2-3% of
 the underlying price (snapped to a fixed set of width steps), uses mid/mark prices, filters

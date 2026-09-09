@@ -64,6 +64,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .caution .regime-strat-val{background:var(--ad);color:var(--amber);border:1px solid rgba(246,176,66,.3)}
 .signals-row{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:14px}
 .signal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rs);padding:9px 12px}
+.signal.context{opacity:.55;border-style:dashed}
 .signal-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:4px}
 .signal-val{font-size:12px;font-weight:500;font-family:'DM Mono',monospace}
 .signal-val.bull{color:var(--green)}.signal-val.bear{color:var(--red)}.signal-val.neut{color:var(--purple)}.signal-val.warn{color:var(--amber)}
@@ -217,6 +218,16 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .stat-val.green{color:var(--green)}.stat-val.red{color:var(--red)}.stat-val.amber{color:var(--amber)}
 .stat-sub{font-size:10px;color:var(--text3);font-family:'DM Mono',monospace;margin-top:4px}
 .perf-verdict{grid-column:1/-1;padding:12px 16px;border-radius:var(--rs);font-size:13px;line-height:1.5}
+.regime-breakdown{grid-column:1/-1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.rb-title{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-family:'DM Mono',monospace;margin-bottom:10px}
+.rb-table{width:100%;border-collapse:collapse;font-size:13px}
+.rb-table th{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-family:'DM Mono',monospace;font-weight:400;text-align:right;padding:0 0 7px}
+.rb-table th:first-child,.rb-table td:first-child{text-align:left}
+.rb-table td{padding:7px 0;border-top:1px solid var(--border);text-align:right;font-family:'DM Mono',monospace}
+.rb-table td.green{color:var(--green)}.rb-table td.red{color:var(--red)}
+.rb-table tr.muted td{color:var(--text3)}
+.rb-sub{color:var(--text3);font-size:11px}
+.rb-note{font-size:12px;color:var(--text3);line-height:1.5;margin-top:10px}
 .perf-verdict.good{background:var(--gd);color:var(--green);border:1px solid rgba(45,212,160,.3)}
 .perf-verdict.ok{background:var(--ad);color:var(--amber);border:1px solid rgba(246,176,66,.3)}
 .perf-verdict.bad{background:var(--rd);color:var(--red);border:1px solid rgba(240,96,96,.3)}
@@ -838,6 +849,10 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 // server on startup and kept in sync as changes are written through.
 let tradeLog = [];
 let pendingTrade = null;
+// Regime as of the last scan or regime analysis. Stamped onto trades at log
+// time so the Trade Log can report win rate by regime — the only way to check
+// the "only trade bullish days" rule against real fills instead of a proxy.
+let lastRegime = null;
 
 async function loadTrades() {
   try {
@@ -1190,6 +1205,7 @@ async function analyzeRegime() {
 }
 
 function renderRegime(d) {
+  lastRegime = d.regime || null;
   const icons = {bullish:'↑',bearish:'↓',neutral:'↔',caution:'⚠'};
   const b = document.getElementById('regimeBanner');
   b.className = 'regime-banner ' + d.regime; b.style.display = 'flex';
@@ -1199,10 +1215,15 @@ function renderRegime(d) {
     <div class="regime-strat"><div class="regime-strat-lbl">Strategy</div>
     <div class="regime-strat-val">${d.recommended_strategy_short}</div></div>`;
   const sigs = d.signals;
-  const labels = {spy_trend:'SPY',vix:'VIX',market_breadth:'Trend',sector_rotation:'Rotation',momentum:'Momentum'};
+  const labels = {spy_trend:'SPY',vix:'VIX',trend_slope:'Trend',sector_rotation:'Rotation',momentum:'Momentum'};
   let sh = '<div class="signals-row">';
   Object.keys(sigs).forEach(k => {
-    sh += `<div class="signal"><div class="signal-lbl">${labels[k]||k}</div><div class="signal-val ${sigs[k].signal}">${sigs[k].value}</div></div>`;
+    // vote:false signals (sector rotation) are shown for context only — they
+    // do not feed the regime decision, so dim them and say so on hover.
+    const ctx = sigs[k].vote === false;
+    const cls = 'signal' + (ctx ? ' context' : '');
+    const tip = ctx ? ' title="Context only — does not vote in the regime decision"' : '';
+    sh += `<div class="${cls}"${tip}><div class="signal-lbl">${labels[k]||k}</div><div class="signal-val ${sigs[k].signal}">${sigs[k].value}</div></div>`;
   });
   sh += '</div>';
   const sr = document.getElementById('signalsRow'); sr.innerHTML = sh; sr.style.display = 'block';
@@ -1416,6 +1437,7 @@ function renderTrades(data) {
   let html = `<div class="market-note">${data.market_context}</div>`;
   html += `<div class="scan-meta">${data.trades.length} setups · ${data.scan_date} · Live data · Earnings filtered</div>`;
   const regime = data.regime?.regime || 'bullish';
+  if (data.regime?.regime) lastRegime = data.regime.regime;
   const sc = regime==='bearish'?'bear':regime==='neutral'?'neut':'bull';
 
   data.trades.forEach(t => {
@@ -1645,6 +1667,7 @@ async function saveToLog() {
     status:'open', exitPrice:null, pnl:null,
     ibd_rs: pendingTrade.ibd_rs, ibd_score: pendingTrade.setup_score,
     is_condor: pendingTrade.is_condor ? 1 : 0,
+    regime: lastRegime,
   };
   await apiAddTrade(trade);
   closeModal();
@@ -1675,6 +1698,10 @@ function openEditModal(id) {
     <div class="mf"><label>Profit target</label><input type="number" id="e_target" value="${v('target',0)}" step="0.01"></div>
     <div class="mf"><label>Stop loss</label><input type="number" id="e_stop" value="${v('stop',0)}" step="0.01"></div>
     <div class="mf"><label>IBD RS (optional)</label><input type="number" id="e_ibd_rs" value="${v('ibd_rs','')}" min="0" max="99"></div>
+    <div class="mf"><label>Market regime at entry</label><select id="e_regime">
+      ${['','bullish','neutral','caution','bearish'].map(o =>
+        `<option value="${o}"${v('regime','')===o?' selected':''}>${o ? o[0].toUpperCase()+o.slice(1) : '— not recorded —'}</option>`).join('')}
+    </select></div>
     <div class="mf"><label>Notes</label><textarea id="e_notes" placeholder="Why you took this…">${v('notes','')}</textarea></div>`;
   document.getElementById('editModal').classList.add('open');
 }
@@ -1702,6 +1729,7 @@ async function saveEditModal() {
     target:     parseFloat(document.getElementById('e_target').value) || 0,
     stop:       parseFloat(document.getElementById('e_stop').value) || 0,
     ibd_rs:     ibdRs ? parseInt(ibdRs) : null,
+    regime:     document.getElementById('e_regime').value || null,
     notes:      document.getElementById('e_notes').value,
   };
 
@@ -1789,6 +1817,60 @@ function renderLog() {
   } else if (tradeLog.length > 0) {
     document.getElementById('logStats').innerHTML +=
       `<div class="perf-verdict ok">Log ${closedTrades.length} of ~20-30 closed trades before judging performance — small samples mislead.</div>`;
+  }
+
+  // ── Win rate by market regime ────────────────────────────────────────────
+  // The playbook says to take bullish regimes and sit out neutral ones. This
+  // table is the only thing that checks that rule against your own fills
+  // rather than against a market proxy — so it needs the regime stamped at
+  // entry, which trades logged before that existed won't have.
+  const REGIMES = ['bullish','caution','neutral','bearish'];
+  const byRegime = {};
+  closedTrades.forEach(t => {
+    const k = REGIMES.includes(t.regime) ? t.regime : 'unrecorded';
+    (byRegime[k] = byRegime[k] || []).push(t);
+  });
+  const rbOrder = REGIMES.filter(r => byRegime[r]).concat(byRegime.unrecorded ? ['unrecorded'] : []);
+  if (rbOrder.length) {
+    const cell  = (v, txt) => `<td class="${v > 0 ? 'green' : v < 0 ? 'red' : ''}">${txt}</td>`;
+    // Sign goes outside the unit: -$103, not $-103.
+    const money = v => `${v < 0 ? '-' : v > 0 ? '+' : ''}$${Math.abs(v).toFixed(0)}`;
+    const pct   = v => `${v < 0 ? '' : v > 0 ? '+' : ''}${v}%`;
+    const body = rbOrder.map(k => {
+      const ts   = byRegime[k];
+      const w    = ts.filter(t => t.status === 'won').length;
+      const rate = Math.round(w / ts.length * 100);
+      const pnl  = ts.reduce((s,t) => s + (t.pnl || 0), 0);
+      const exp  = pnl / ts.length;
+      const rets = ts.filter(t => t.debit > 0 && t.exitPrice !== null && t.exitPrice !== undefined);
+      const avgRet = rets.length
+        ? Math.round(rets.reduce((s,t) => s + ((t.exitPrice - t.debit) / t.debit * 100), 0) / rets.length)
+        : null;
+      const lbl = k === 'unrecorded' ? 'Not recorded' : k[0].toUpperCase() + k.slice(1);
+      return `<tr class="${k === 'unrecorded' ? 'muted' : ''}">
+        <td>${lbl}</td>
+        <td>${ts.length}</td>
+        ${cell(rate - 50, `${rate}% <span class="rb-sub">${w}/${ts.length}</span>`)}
+        ${avgRet === null ? '<td>—</td>' : cell(avgRet, pct(avgRet))}
+        ${cell(exp, money(exp))}
+        ${cell(pnl, money(pnl))}
+      </tr>`;
+    }).join('');
+
+    const nUnrec = (byRegime.unrecorded || []).length;
+    const thin   = rbOrder.filter(k => k !== 'unrecorded' && byRegime[k].length >= 10).length === 0;
+    let note = '';
+    if (nUnrec) note += `${nUnrec} closed trade${nUnrec===1?'':'s'} predate${nUnrec===1?'s':''} regime tracking — set it by hand via Edit if you remember the conditions. `;
+    if (thin) note += 'Not enough closed trades in any one regime to read yet — ~10 per regime before these numbers mean anything.';
+    document.getElementById('logStats').innerHTML += `
+      <div class="regime-breakdown">
+        <div class="rb-title">Performance by market regime at entry</div>
+        <table class="rb-table">
+          <thead><tr><th>Regime</th><th>Closed</th><th>Win rate</th><th>Avg return</th><th>Per trade</th><th>Total P&L</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+        ${note ? `<div class="rb-note">${note}</div>` : ''}
+      </div>`;
   }
 
   if (!filtered.length) { document.getElementById('logContent').innerHTML='<div class="log-empty"><p style="color:var(--text2);font-size:14px">No trades yet.</p></div>'; return; }

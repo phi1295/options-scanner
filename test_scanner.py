@@ -189,21 +189,60 @@ check('Mid-range → normal',               urgency, 'normal')
 
 # ══════════════════════════════════════════════════════════════════════════════
 section('Regime detection vote counting')
-def regime_from_votes(bull, bear, neut, caut):
-    votes = ['bullish']*bull + ['bearish']*bear + ['neutral']*neut + ['caution']*caut
-    b=votes.count('bullish'); be=votes.count('bearish')
-    ca=votes.count('caution'); ne=votes.count('neutral')
-    if be>=3:   return 'bearish'
-    elif b>=3:  return 'bullish'
-    elif ca>=2 or (be>=2 and b<=1): return 'caution'
-    else: return 'neutral'
+# Imported from app, NOT re-implemented here — the old copy of these thresholds
+# passed no matter what app.py actually did.
+rfv = app.regime_from_votes
 
-check('3+ bullish votes → bullish',         regime_from_votes(3,0,0,0), 'bullish')
-check('3+ bearish votes → bearish',         regime_from_votes(0,3,0,0), 'bearish')
-check('2 caution votes → caution',          regime_from_votes(1,0,0,2), 'caution')
-check('2 bear + 1 bull → caution',          regime_from_votes(1,2,0,0), 'caution')
-check('Mixed = neutral',                    regime_from_votes(1,1,1,0), 'neutral')
-check('All neutral = neutral',              regime_from_votes(0,0,5,0), 'neutral')
+check('3+ bearish votes → bearish',          rfv(0, 3, 0, 0, False), 'bearish')
+check('3+ bullish votes → bullish',          rfv(3, 0, 0, 0, False), 'bullish')
+check('bearish beats bullish at 3/3',        rfv(3, 3, 0, 0, False), 'bearish')
+check('3 caution votes → caution',           rfv(1, 0, 3, 0, False), 'caution')
+check('2 caution votes alone → not caution', rfv(2, 0, 2, 0, False) != 'caution', True)
+check('2 bear + 1 bull → caution',           rfv(1, 2, 0, 0, False), 'caution')
+
+# The core fix: abstentions must not manufacture a range-bound reading.
+check('SPY trend + VIX bullish, rest abstain → bullish',
+      rfv(3, 0, 0, 2, False), 'bullish')
+check('2 bull, 0 bear, no range evidence → bullish (not neutral)',
+      rfv(2, 0, 0, 3, False), 'bullish')
+# Asymmetric on purpose: unconfirmed weakness cuts size rather than flipping
+# the book short. Either way it must not become 'neutral' by default.
+check('2 bear, 0 bull, no range evidence → caution (not neutral)',
+      rfv(0, 2, 0, 3, False), 'caution')
+check('all abstain, no range evidence → caution (not neutral)',
+      rfv(0, 0, 0, 5, False), 'caution')
+check('neutral requires positive range-bound evidence',
+      rfv(2, 1, 0, 2, True), 'neutral')
+check('range-bound does not override a confirmed uptrend',
+      rfv(3, 0, 0, 2, True), 'bullish')
+check('range-bound does not override a confirmed downtrend',
+      rfv(0, 3, 0, 2, True), 'bearish')
+
+section('20-day MA slope (replaces the old 3-point breadth check)')
+_rising  = np.array([100 + i*0.5 for i in range(60)])
+_falling = np.array([100 - i*0.5 for i in range(60)])
+_flat    = np.array([100.0]*60)
+check('rising series → positive slope',   app.ma_slope_pct(_rising) > 0.5, True)
+check('falling series → negative slope',  app.ma_slope_pct(_falling) < -0.5, True)
+check('flat series → ~zero slope',        abs(app.ma_slope_pct(_flat)) < 0.01, True)
+check('too-short series → 0.0',           app.ma_slope_pct(np.array([1.0]*10)), 0.0)
+
+# A single down day inside an uptrend used to flip the old c[-1]>c[-10]>c[-20]
+# check to neutral/bearish. The slope must ride through it.
+_dip = _rising.copy(); _dip[-1] = _dip[-2] - 1.0
+check('one down day does not flip an uptrend', app.ma_slope_pct(_dip) > 0.5, True)
+
+section('Range-bound detection (the only path to the neutral regime)')
+check('flat tape is range-bound',        app.is_range_bound(_flat), True)
+check('rising tape is NOT range-bound',  app.is_range_bound(_rising), False)
+check('falling tape is NOT range-bound', app.is_range_bound(_falling), False)
+check('too-short series is not range-bound', app.is_range_bound(np.array([1.0]*10)), False)
+# Oscillating inside a tight band around a flat 50d MA
+_chop = np.array([100 + (2 if i % 2 else -2)*0.5 for i in range(60)])
+check('tight chop is range-bound',       app.is_range_bound(_chop), True)
+# Same chop but drifting up 15% over the window — no longer a range
+_drift = np.array([100 + i*0.25 + (1 if i % 2 else -1) for i in range(60)])
+check('upward drift is NOT range-bound', app.is_range_bound(_drift), False)
 
 # ══════════════════════════════════════════════════════════════════════════════
 section('Structure string strike parsing (for Daily Review)')
@@ -846,9 +885,53 @@ check('Clear empties trades', _client.get('/api/trades').get_json(), [])
 # Settings survive trade clear (separate table)
 check('Settings survive trade clear', _client.get('/api/settings').get_json()['account'], '25000')
 
+# Regime at entry — round-trips so win rate can be broken down by regime
+check('regime is an accepted trade column', 'regime' in app._TRADE_COLS, True)
+_client.post('/api/trades', json={'id':7,'ticker':'NVDA','debit':2.0,'contracts':1,
+                                  'status':'won','pnl':100.0,'regime':'bullish'})
+_saved = _client.get('/api/trades').get_json()[0]
+check('regime persists through POST', _saved.get('regime'), 'bullish')
+_client.put('/api/trades/7', json={**_saved, 'regime':'neutral'})
+check('regime updates through PUT', _client.get('/api/trades').get_json()[0].get('regime'), 'neutral')
+_client.post('/api/trades', json={'id':8,'ticker':'MU','debit':2.0,'contracts':1,'status':'won'})
+check('trade logged without a regime stores NULL',
+      [t for t in _client.get('/api/trades').get_json() if t['id']==8][0].get('regime'), None)
+_client.post('/api/trades/clear')
+
 _os.unlink(app.DB_PATH)
 app.DB_PATH = _orig_db
 print('  (storage tested against temp DB, cleaned up)')
+
+# ══════════════════════════════════════════════════════════════════════════════
+section('Regime column migration on a pre-existing database')
+# scanner.db in the wild was created before `regime` existed; init_db must add
+# the column in place rather than leave the DB unreadable or drop the trades.
+_mig_db = tempfile.mktemp(suffix='.db')
+import sqlite3 as _sq
+_c = _sq.connect(_mig_db)
+_c.execute('''CREATE TABLE trades (
+    id INTEGER PRIMARY KEY, ticker TEXT, company TEXT, structure TEXT,
+    expiration TEXT, entryDate TEXT, contracts INTEGER, debit REAL,
+    target REAL, stop REAL, returnPct REAL, notes TEXT, status TEXT,
+    exitPrice REAL, pnl REAL, ibd_rs INTEGER, ibd_score INTEGER,
+    is_condor INTEGER DEFAULT 0, created_at TEXT)''')
+_c.execute("INSERT INTO trades (id,ticker,status,pnl) VALUES (42,'AMD','won',300.0)")
+_c.commit(); _c.close()
+
+_orig_db2 = app.DB_PATH
+app.DB_PATH = _mig_db
+app.init_db()
+_cols = {r[1] for r in _sq.connect(_mig_db).execute('PRAGMA table_info(trades)')}
+check('migration adds the regime column', 'regime' in _cols, True)
+app.init_db()   # must be safe to run on every startup
+check('migration is idempotent',
+      len([r for r in _sq.connect(_mig_db).execute('PRAGMA table_info(trades)') if r[1]=='regime']), 1)
+_rows = app.app.test_client().get('/api/trades').get_json()
+check('existing trades survive the migration', len(_rows), 1)
+check('pre-migration trade keeps its data', _rows[0]['pnl'], 300.0)
+check('pre-migration trade has a null regime', _rows[0].get('regime'), None)
+app.DB_PATH = _orig_db2
+_os.unlink(_mig_db)
 
 # ══════════════════════════════════════════════════════════════════════════════
 section('Configurable server port')
