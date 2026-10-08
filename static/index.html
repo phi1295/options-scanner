@@ -732,7 +732,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
           <div class="instr-title">Strategy &amp; position sizing</div>
           <div class="step"><div class="step-num">10</div><div class="step-body">
             <h3>How the scanner picks spreads — built for win rate</h3>
-            <p>The scanner buys <strong>slightly in-the-money</strong> spreads (long leg about 2-3% in the money, roughly 60-65 delta) rather than at-the-money. Being in the money at entry means the stock barely has to move for the trade to work — this raises your win rate and means a slightly-ITM spread doesn't whipsaw on every intraday move, so once-a-day checking is enough.</p>
+            <p>The scanner buys <strong>in-the-money</strong> spreads, trying long legs from at-the-money out to about 8% in the money and keeping the one with the highest probability of profit that still clears the 25% return floor. Being in the money at entry means the stock barely has to move for the trade to work, and the spread doesn't whipsaw on every intraday move, so once-a-day checking is enough. Keep in mind that deeper ITM costs more debit, so a higher POP always comes with a higher win rate needed to break even (shown on each card).</p>
             <ul>
               <li>Return target is <strong>25-50% on debit</strong> — clears your 25% minimum while keeping spreads in high-probability territory</li>
               <li>Max loss is always the debit you pay — defined and capped, no matter what the stock does</li>

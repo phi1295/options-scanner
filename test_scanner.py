@@ -514,28 +514,44 @@ ps_wrong = app.calc_position_size(debit=2.00, account_size=10000, risk_pct=1.5)
 check('Override differs from naive debit sizing',
       ps['dollar_risk'] != ps_wrong['dollar_risk'], True)
 
-section('Slightly-ITM strike selection logic')
-# For bullish: long leg target is ~2.5% below price (ITM)
-def itm_long_strike(price, strikes, bullish=True):
-    if bullish:
-        cands = [s for s in strikes if s < price]
-        target = price * 0.975
-        return min(cands, key=lambda x: abs(x-target)) if cands else min(strikes, key=lambda x: abs(x-price))
-    else:
-        cands = [s for s in strikes if s > price]
-        target = price * 1.025
-        return min(cands, key=lambda x: abs(x-target)) if cands else min(strikes, key=lambda x: abs(x-price))
+section('Long strike candidates (ATM to ~8% ITM)')
+strikes = [480, 485, 490, 495, 500, 505, 510, 515, 520, 525, 530, 535, 540]
+_lc = app.long_strike_candidates(strikes, 523, True)
+check('Bullish: nearest-the-money strike tried first', _lc[0], 525)
+check('Bullish: other candidates are all ITM (below price)', all(s < 523 for s in _lc[1:]), True)
+check('Bullish: reaches ~8% ITM', min(_lc), 485)
+check('Bullish: nothing deeper than 8% ITM', 480 in _lc, False)
+check('Bullish: includes the old ~2.5% ITM strike', 510 in _lc, True)
 
-strikes = [510, 515, 520, 525, 530, 535, 540]
-# AMD at 523, bullish → target 510, closest ITM is 510 or 515
-buy = itm_long_strike(523, strikes, True)
-check('Bullish long leg is ITM (below price)', buy < 523, True)
-check('Bullish long leg near 2.5% ITM', buy in [510, 515], True)
+strikes2 = [325, 330, 335, 340, 345, 350, 355, 360, 365]
+_lp = app.long_strike_candidates(strikes2, 336, False)
+check('Bearish: candidates beyond nearest are ITM (above price)', all(s > 336 for s in _lp[1:]), True)
+check('Bearish: reaches ~8% ITM', max(_lp), 360)
+check('Empty chain yields no candidates', app.long_strike_candidates([], 100, True), [])
 
-# Bearish at 336 → target above price
-strikes2 = [325, 330, 335, 340, 345, 350]
-buy2 = itm_long_strike(336, strikes2, False)
-check('Bearish long leg is ITM (above price)', buy2 > 336, True)
+section('Delta validation and strike labels')
+check('Schwab -999 placeholder delta is rejected', app.valid_delta(-999.0), None)
+check('Missing delta is rejected', app.valid_delta(None), None)
+check('NaN delta is rejected', app.valid_delta(float('nan')), None)
+check('Put delta is returned as |delta|', app.valid_delta(-0.62), 0.62)
+check('Call delta passes through', app.valid_delta(0.45), 0.45)
+check('Whole-dollar strike label', app.fmt_strike(85.0), '85')
+check('Half-dollar strike keeps its .5 (was rounded to 82)', app.fmt_strike(82.5), '82.5')
+check('Quarter strike label', app.fmt_strike(7.25), '7.25')
+
+section('Bid/ask fill filter')
+_b = {'bid': 3.90, 'ask': 4.10}; _s = {'bid': 1.95, 'ask': 2.05}   # debit 2.00
+check('Slippage is half of each quote width over the debit',
+      round(app.fill_slippage_pct(_b, _s, 2.00), 4), 0.075)
+check('Tight quotes pass the 10% cap',
+      app.fill_slippage_pct(_b, _s, 2.00) <= app.MAX_FILL_SLIPPAGE, True)
+check('Wide quotes fail the 10% cap',
+      app.fill_slippage_pct({'bid':3.6,'ask':4.4}, _s, 2.00) > app.MAX_FILL_SLIPPAGE, True)
+check('No bid on the short leg is unfillable', app.fill_slippage_pct(_b, {'bid':0,'ask':2.0}, 2.0), None)
+check('No ask on the long leg is unfillable', app.fill_slippage_pct({'bid':3.9,'ask':0}, _s, 2.0), None)
+check('Crossed quote is rejected', app.fill_slippage_pct({'bid':4.2,'ask':4.0}, _s, 2.0), None)
+check('Measured on the debit, not per leg: cheap legs with wide-looking quotes pass',
+      app.fill_slippage_pct({'bid':0.25,'ask':0.35}, {'bid':0.0+0.05,'ask':0.15}, 3.00) < 0.05, True)
 
 section('Return band 25-50%')
 def in_band(rp): return 25 <= rp <= 50

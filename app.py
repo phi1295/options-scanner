@@ -1468,8 +1468,10 @@ def prob_beyond(buy_s: float, sell_s: float, buy_delta: float,
     price that matters to a vertical (its breakeven, its profit-target price)
     sits between the two strikes, so we interpolate between them.
 
-    This is a chord approximation of a convex curve, so it reads slightly low
-    in the middle of the range. That's fine for ranking candidates against
+    This is a chord approximation of a curved function. For the slightly-ITM
+    structures the scanner builds it reads a few points HIGH versus a
+    lognormal model (roughly 58% chord vs 54% model at 2.5% ITM), so treat
+    it as optimistic. That's fine for ranking candidates against
     each other; it is not a precise probability and shouldn't be presented as
     one.
 
@@ -1493,6 +1495,78 @@ def prob_beyond(buy_s: float, sell_s: float, buy_delta: float,
     d = d_lo + (t - lo) / (hi - lo) * (d_hi - d_lo)
     return max(0.01, min(0.99, d))
 
+def valid_delta(raw: Any) -> Optional[float]:
+    """|delta| if it's a real value in [0, 1], else None.
+
+    Schwab reports -999 (and sometimes NaN or nothing) when it can't compute
+    a Greek; none of those can be used to estimate a probability.
+    """
+    try:
+        d = abs(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return d if 0.0 <= d <= 1.0 else None
+
+# Max bid/ask cost of a vertical as a fraction of its debit. Buying at the ask
+# and selling at the bid costs half of each leg's quote width over the mid;
+# above 10% of the debit, a 25% return on the card is ~15-20% in practice.
+MAX_FILL_SLIPPAGE = 0.10
+MIN_LEG_OI = 5
+
+def fill_slippage_pct(buy_o: dict, sell_o: dict, debit: float) -> Optional[float]:
+    """Worst-case fill cost of a vertical, as a fraction of its debit.
+
+    Worst case is paying the ask on the long leg and taking the bid on the
+    short leg. The excess over the mid debit is half of each leg's bid/ask
+    width, summed. Measured against the debit (not per leg) because that's
+    what comes out of the return: a $0.10-wide quote is 30% of a $0.30 leg
+    but only 3% of a $3.00 debit.
+
+    Args:
+        buy_o: Long leg option dict with 'bid'/'ask'.
+        sell_o: Short leg option dict with 'bid'/'ask'.
+        debit: The debit shown on the trade card (from mark prices).
+
+    Returns:
+        Slippage fraction, or None if either leg lacks a usable two-sided
+        quote (no bid on the short leg means nobody to sell to).
+    """
+    bb, ba = buy_o.get('bid') or 0, buy_o.get('ask') or 0
+    sb, sa = sell_o.get('bid') or 0, sell_o.get('ask') or 0
+    if debit <= 0 or ba <= 0 or sb <= 0 or ba < bb or sa < sb:
+        return None
+    return ((ba - bb) / 2 + (sa - sb) / 2) / debit
+
+def fmt_strike(k: float) -> str:
+    """Strike label without losing half-dollar strikes: 85 → '85', 82.5 → '82.5'."""
+    return f'{k:.2f}'.rstrip('0').rstrip('.')
+
+def long_strike_candidates(strikes: List[float], price: float, bullish: bool,
+                           max_itm_pct: float = 0.08) -> List[float]:
+    """Long-leg strikes to try for a vertical: ~ATM out to `max_itm_pct` ITM.
+
+    Includes the nearest strike to spot (which may be a hair OTM) so thin
+    chains still produce a candidate, then every ITM strike within range.
+
+    Args:
+        strikes: Sorted strikes available at one expiration.
+        price: Current underlying price.
+        bullish: True for call spreads (ITM = below price), False for puts.
+        max_itm_pct: Deepest ITM distance to try, as a fraction of price.
+
+    Returns:
+        Candidate long strikes, nearest-the-money first.
+    """
+    if not strikes:
+        return []
+    nearest = min(strikes, key=lambda x: abs(x - price))
+    if bullish:
+        itm = [s for s in strikes if price * (1 - max_itm_pct) <= s < price]
+    else:
+        itm = [s for s in strikes if price < s <= price * (1 + max_itm_pct)]
+    out = sorted(set(itm) | {nearest}, key=lambda x: abs(x - price))
+    return out
+
 def get_best_spread(client: Any, symbol: str, price: float, regime: str,
                     atr_pct: Optional[float] = None) -> Optional[dict]:
     """Build the best bull call spread (or bear put spread) for a stock.
@@ -1500,14 +1574,18 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
     Key design decisions:
     - Spread width scales with stock price: ~2-3% of stock price
     - Use mark (mid) prices throughout for realistic fills
-    - OI filter: both legs need OI >= 10 (retail size)
-    - Bid/ask filter: < 20% of mid (percentage, not absolute)
+    - OI filter: both legs need OI >= MIN_LEG_OI (5)
+    - Bid/ask filter: worst-case fill (long at ask, short at bid) may cost at
+      most MAX_FILL_SLIPPAGE (10%) of the debit over mid (`fill_slippage_pct`)
+    - Width capped at 5% of price (min $1) after snapping to listed strikes
+    - Both legs need a usable delta (Schwab's -999 placeholder is rejected)
     - Return filter: 25-50% return on debit (matches the enforced check below)
     - Strike selection is by price proximity, not delta — Schwab chain deltas
       are unreliable enough to pick strikes with, but good enough to *score*
       an already-chosen pair (see the probability estimate below)
 
-    Searches 30-45 DTE expirations, tries several strike widths around the
+    Searches 30-45 DTE expirations, every long strike from ~ATM to ~8% ITM
+    (`long_strike_candidates`), and several strike widths around the
     price-scaled target, and keeps the candidate with the highest estimated
     probability of profit, with shorter DTE as the tiebreaker. It used to keep the highest return on debit within a 10-point
     tolerance; ranking on probability directly prefers the narrower spread
@@ -1560,7 +1638,9 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
         # AMD $523 → ~$10-15 wide, LRCX $336 → ~$7.5-10, IBKR $87 → ~$5
         raw_width   = price * 0.025
         # Round to nearest available width: 2.5, 5, 7.5, 10, 12.5, 15, 20, 25
-        width_steps = [2.5, 5, 7.5, 10, 12.5, 15, 20, 25, 30, 40, 50]
+        # 1 and 2 let sub-$80 names get a width near 2-3% instead of a 2.5/5
+        # wide spread that is 10%+ of the share price.
+        width_steps = [1, 2, 2.5, 5, 7.5, 10, 12.5, 15, 20, 25, 30, 40, 50]
         target_width = min(width_steps, key=lambda w: abs(w - raw_width))
         # Also try widths above and below in case target isn't available
         # Always try target width plus the steps immediately below and above it
@@ -1568,6 +1648,10 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
         below = width_steps[max(0, idx-1)]
         above = width_steps[min(len(width_steps)-1, idx+1)]
         try_widths = sorted(set([below, target_width, above]))
+        # Hard ceiling on the width actually built. Strikes snap to whatever
+        # the chain lists, so a sparse chain could otherwise turn a 2.5 target
+        # into a 10-wide spread. Never narrower than $1 (the minimum allowed).
+        max_width = max(price * 0.05, 1.0)
         print(f'  Building {symbol} (${price:.0f})…')
         emit(f'Building spread for {symbol} (${price:.0f})…')
 
@@ -1621,25 +1705,16 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
             if len(strikes) < 3:
                 continue
 
-            # Long leg: slightly IN THE MONEY for higher win rate.
-            # For calls (bullish): one strike BELOW current price (~60-65 delta)
-            # For puts (bearish):  one strike ABOVE current price (~60-65 delta)
-            # Being ITM at entry means the stock doesn't have to move much to win,
-            # which raises the probability of profit and suits once-a-day monitoring.
-            if regime in ('bullish', 'caution'):
-                itm_candidates = [s for s in strikes if s < price]
-                itm_target = price * 0.975   # ~2.5% ITM, roughly 60-65 delta
-                atm = min(itm_candidates, key=lambda x: abs(x - itm_target)) if itm_candidates \
-                      else min(strikes, key=lambda x: abs(x - price))
-            else:
-                itm_candidates = [s for s in strikes if s > price]
-                itm_target = price * 1.025
-                atm = min(itm_candidates, key=lambda x: abs(x - itm_target)) if itm_candidates \
-                      else min(strikes, key=lambda x: abs(x - price))
-
+            # Long leg: search every strike from ~ATM out to ~8% ITM rather
+            # than pinning one strike ~2.5% ITM. POP at breakeven can never
+            # exceed the long leg's delta, so a single ~60-delta long strike
+            # capped POP in the high 50s no matter what else passed. Deeper ITM
+            # raises POP but costs more debit relative to width, so the 25-50%
+            # return band below is what decides how deep a given name can go.
+            long_strikes = long_strike_candidates(strikes, price, regime in ('bullish', 'caution'))
             # Try each target width — deduplicate by actual (buy_s, sell_s) pair
             tried_pairs = set()
-            for tw in try_widths:
+            for atm, tw in ((a, w) for a in long_strikes for w in try_widths):
                 if regime in ('bullish', 'caution'):
                     buy_s  = atm
                     target = atm + tw
@@ -1655,6 +1730,7 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
 
                 actual_width = abs(sell_s - buy_s)
                 if actual_width < 1.0: continue  # skip $1 wide — too narrow
+                if actual_width > max_width: continue  # strikes too sparse
 
                 pair = (buy_s, sell_s)
                 if pair in tried_pairs: continue
@@ -1672,8 +1748,8 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
                 buy_oi_    = buy_o.get('openInterest', 0) or 0
                 sell_oi_   = sell_o.get('openInterest', 0) or 0
 
-                if buy_oi_ < 5:
-                    continue  # buy OI too low
+                if buy_oi_ < MIN_LEG_OI or sell_oi_ < MIN_LEG_OI:
+                    continue  # either leg too thinly held to fill
                 if buy_mark_ <= 0 or sell_mark_ <= 0:
                     continue  # zero mark prices
 
@@ -1695,11 +1771,22 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
                 if rp < 25 or rp > 50: continue  # outside target band
                 if nd < 0.50: continue            # debit too cheap
 
+                # The return above assumes a fill at mark. Skip spreads whose
+                # quotes are wide enough that a realistic fill erodes it.
+                slip = fill_slippage_pct(buy_o, sell_o, nd)
+                if slip is None or slip > MAX_FILL_SLIPPAGE:
+                    continue
+
                 buy_oi    = buy_o.get('openInterest', 0) or 0
                 sell_oi   = sell_o.get('openInterest', 0) or 0
                 buy_iv    = norm_iv(buy_o.get('volatility', 0))
-                buy_delta = abs(buy_o.get('delta', 0.5) or 0.5)
-                sell_delta= abs(sell_o.get('delta', 0.0) or 0.0)
+                buy_delta = valid_delta(buy_o.get('delta'))
+                sell_delta= valid_delta(sell_o.get('delta'))
+                # Schwab sends -999 when it can't compute a Greek. abs() of that
+                # clamped POP to 99%, so the unscorable spread won the ranking.
+                # Without both deltas there's no POP to rank on, so skip it.
+                if buy_delta is None or sell_delta is None:
+                    continue
                 buy_theta = buy_o.get('theta', 0) or 0
                 be        = round(buy_s + nd if regime in ('bullish','caution') else buy_s - nd, 2)
 
@@ -1729,13 +1816,13 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
                 contracts = max(1, math.floor(10000 / (nd * 100 * 2)))
                 leg       = 'call' if regime in ('bullish','caution') else 'put'
 
-                print(f'    {symbol} DTE={dte}: ${buy_s:.0f}/{sell_s:.0f} w={actual_width:.0f} debit=${nd:.2f} return={rp}% OI={buy_oi}/{sell_oi}')
+                print(f'    {symbol} DTE={dte}: ${fmt_strike(buy_s)}/{fmt_strike(sell_s)} w={fmt_strike(actual_width)} debit=${nd:.2f} return={rp}% OI={buy_oi}/{sell_oi}')
 
                 result = {
                     'expiration': exp_date.strftime('%b %d %Y'),
                     'dte': dte,
-                    'buy_leg':  f'Buy ${buy_s:.0f} {leg}',
-                    'sell_leg': f'Sell ${sell_s:.0f} {leg}',
+                    'buy_leg':  f'Buy ${fmt_strike(buy_s)} {leg}',
+                    'sell_leg': f'Sell ${fmt_strike(sell_s)} {leg}',
                     'net_debit': nd, 'max_profit': mp, 'breakeven': be,
                     'entry': nd, 'profit_target': pt, 'stop_loss': sl,
                     'return_on_debit': rp,
@@ -1751,6 +1838,7 @@ def get_best_spread(client: Any, symbol: str, price: float, regime: str,
                     'pop_target': round(pop_target * 100),
                     'breakeven_win_rate': round(be_win_rate * 100),
                     'atr_pct': atr_pct,
+                    'fill_slippage_pct': round(slip * 100, 1),
                 }
                 # Selection logic (the 25-50% return band still gates entry):
                 # 1. Among valid results, prefer the highest probability of profit
@@ -1871,7 +1959,7 @@ def get_iron_condor(client: Any, symbol: str, price: float) -> Optional[dict]:
                 {'action':'BUY', 'type':'put', 'strike':lp,'role':'Long put (downside protection)'},
             ]
             return {'expiration':exp_date.strftime('%b %d %Y'),'dte':dte,
-                    'buy_leg':f'SELL ${sc:.0f}C / BUY ${lc:.0f}C  +  SELL ${sp:.0f}P / BUY ${lp:.0f}P',
+                    'buy_leg':f'SELL ${fmt_strike(sc)}C / BUY ${fmt_strike(lc)}C  +  SELL ${fmt_strike(sp)}P / BUY ${fmt_strike(lp)}P',
                     'sell_leg':f'Iron condor — collect ${nc:.2f} credit',
                     'is_condor':True,
                     'condor_legs':condor_legs,
