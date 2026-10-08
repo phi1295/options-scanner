@@ -1126,6 +1126,13 @@ async function pollAuthCompletion() {
 }
 
 // ── Status ─────────────────────────────────────────────────────────
+// "v 3ae5844 · build 1a2b3c4" — build is a hash of the running code, so it
+// matches between Mac and Pi exactly when they run the same files.
+function versionLabel(v) {
+  if (!v || !v.build) return '';
+  return (v.commit ? `v ${v.commit} · ` : '') + `build ${v.build}`;
+}
+
 async function checkStatus() {
   try {
     const r = await fetch('/api/status'); const d = await r.json();
@@ -1144,6 +1151,8 @@ async function checkStatus() {
     }
     // Add disconnect link if connected
     html += '<br><a href="#" onclick="disconnectSchwab();return false;" style="font-size:10px;color:var(--text3)">Disconnect</a>';
+    const ver = versionLabel(d.version);
+    if (ver) html += `<br><span style="font-size:10px;color:var(--text3);font-family:'DM Mono',monospace">${ver}</span>`;
     el.innerHTML = html;
     // Mirror Schwab connection status to the mobile-only bar on the Scanner page
     const mob = document.getElementById('mobileCredStatus');
@@ -1154,6 +1163,7 @@ async function checkStatus() {
       : d.has_credentials && !d.has_token
         ? '<span style="color:var(--amber)">⚠ Need to reconnect</span>'
         : '<span style="color:var(--red)">✗ Check config.json</span>';
+    if (mob && ver) mob.innerHTML += ` <span style="font-size:10px;color:var(--text3);font-family:'DM Mono',monospace">· ${ver}</span>`;
     if (d.market) {
       const bar = document.getElementById('mktBar');
       const cls = d.market.session === 'regular' ? 'open' : d.market.session === 'pre' ? 'warn' : 'closed';

@@ -7,6 +7,7 @@ Run: python app.py
 """
 
 import os, json, math, time, webbrowser, threading, csv, io, pathlib, re, sqlite3, subprocess
+import hashlib
 import sys
 
 # ── Force UTF-8 output ────────────────────────────────────────────────────────
@@ -49,6 +50,39 @@ try:
     SERVER_PORT = int(_config.get('server_port', os.environ.get('SCANNER_PORT', 8080)))
 except (ValueError, TypeError):
     SERVER_PORT = 8080
+
+# ── Version ───────────────────────────────────────────────────────────────────
+def _compute_version() -> dict:
+    """Identify the code this process is running, for comparing Mac vs Pi.
+
+    `build` is a hash of app.py + static/index.html, so it identifies the code
+    no matter how it got there (git pull or copied files). `commit` is the git
+    commit when the directory is a git checkout, marked '+modified' if those
+    files differ from it. Computed once at startup, so a stale `build` after
+    an update means the service wasn't restarted.
+    """
+    base = pathlib.Path(__file__).parent
+    h = hashlib.sha256()
+    for rel in ('app.py', 'static/index.html'):
+        try:
+            h.update((base / rel).read_bytes())
+        except OSError:
+            pass
+    commit = None
+    try:
+        commit = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=base,
+                                capture_output=True, text=True, timeout=3).stdout.strip() or None
+        if commit:
+            dirty = subprocess.run(['git', 'status', '--porcelain', '--', 'app.py', 'static/index.html'],
+                                   cwd=base, capture_output=True, text=True, timeout=3).stdout.strip()
+            if dirty:
+                commit += '+modified'
+    except (OSError, subprocess.SubprocessError):
+        commit = None
+    return {'build': h.hexdigest()[:7], 'commit': commit,
+            'started': datetime.now().isoformat(timespec='seconds')}
+
+APP_VERSION = _compute_version()
 
 # ── SQLite storage (single portable file: scanner.db) ─────────────────────────
 # This file holds trades + settings, shared across all clients (Mac, phone).
@@ -2405,7 +2439,13 @@ def api_status():
                        'updated':json.load(open(IBD50_PATH)).get('updated','') if IBD50_PATH.exists() else ''}
     return jsonify({'has_credentials':has_creds,'has_token':has_token,'config_file':config_ok,
                     'ready':connected,'market':mkt,'auth_error':_auth_error,
-                    'ibd50':ibd_summary,'universe_count':len(_universe_cache['symbols'])})
+                    'ibd50':ibd_summary,'universe_count':len(_universe_cache['symbols']),
+                    'version':APP_VERSION})
+
+@app.route('/api/version')
+def api_version():
+    """Which code is running — cheap, no Schwab call. `curl <host>:<port>/api/version`."""
+    return jsonify(APP_VERSION)
 
 @app.route('/api/regime')
 def api_regime():
@@ -3054,6 +3094,8 @@ if __name__=='__main__':
     init_schwab()  # loads token if available, sets _auth_pending if not
 
     # ── Start Flask ───────────────────────────────────────────────────────
-    print(f'\n  Starting scanner at http://127.0.0.1:{SERVER_PORT} …\n')
+    print(f'\n  Starting scanner at http://127.0.0.1:{SERVER_PORT} …')
+    print(f'  Version: build {APP_VERSION["build"]}'
+          + (f' · commit {APP_VERSION["commit"]}' if APP_VERSION['commit'] else '') + '\n')
     threading.Thread(target=open_browser, daemon=True).start()
     app.run(debug=False, host='0.0.0.0', port=SERVER_PORT, threaded=True)
